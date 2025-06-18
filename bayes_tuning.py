@@ -11,6 +11,9 @@ def get_model_config(trial, vocab_size):
 
     n_embed = trial.suggest_categorical('n_embed', [32, 64, 128, 256, 512])
     num_heads = trial.suggest_categorical('num_heads', [1, 2, 4, 8])
+    warmup_steps = trial.suggest_int('warmup_steps', 100, 2000)
+    peak_learning_rate = trial.suggest_float('peak_learning_rate', 1e-5, 1e-3, log=True)
+
     
     while n_embed % num_heads != 0:
         num_heads = trial.suggest_categorical('num_heads', [1, 2, 4, 8])
@@ -29,7 +32,9 @@ def get_model_config(trial, vocab_size):
         num_epochs=1,
         update_bias=True,
         use_lateral=True,
-        energy_fn_name="kld"
+        energy_fn_name="scaled_mse",
+        warmup_steps=warmup_steps,
+        peak_learning_rate=peak_learning_rate
     )
 
 def objective(trial):
@@ -43,7 +48,7 @@ def objective(trial):
         model = model.to(device)
         
         for epoch in range(1):
-            avg_energy, _ = train(model, train_loader)
+            avg_energy, _ = train(model, train_loader, config)
         
         avg_energy_val, val_loss = evaluate(model, valid_loader, max_batches=10, compute_metrics=False)
         return val_loss

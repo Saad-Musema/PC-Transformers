@@ -11,15 +11,36 @@ from matplotlib.ticker import MaxNLocator
 
 """Usage: python training.py"""
 
-def train(model, dataloader):
+def train(model, dataloader, config):
     model.train()
     total_energy = 0.0
     total_ce_loss = 0.0
     batch_count = 0
+    global_step = 0
+
 
     for batch_idx, batch in enumerate(dataloader):
         input_ids = batch["input_ids"]
         target_ids = batch["target_ids"]
+        
+        # Update learning rate (linear warmup)
+        if global_step < config.warmup_steps:
+            # Linear warmup from base to peak
+            lr = config.local_learning_rate + global_step / config.warmup_steps * (
+                config.peak_learning_rate - config.local_learning_rate
+            )
+        else:
+            lr = config.peak_learning_rate  # Stay constant after warmup
+            
+        # Set this learning rate for each PCLayer
+        for module in model.modules():
+            if hasattr(module, 'local_lr'):
+                module.local_lr = lr
+
+        if global_step % 50 == 0:
+            print(f"[Step {global_step}] Learning Rate: {lr:.6f}")
+            
+        global_step += 1
 
         logits = model(target_ids, input_ids)
 
@@ -83,7 +104,7 @@ def main():
     start_training_time = time.time()
     for epoch in range(config.num_epochs):
         print(f"Epoch {epoch+1} started", flush=True)
-        avg_energy, perplexity = train(model, train_loader)
+        avg_energy, perplexity = train(model, train_loader, config)
         train_energies.append(avg_energy)
         perplexities.append(perplexity)
         print(f"Epoch {epoch+1} | Avg Energy: {avg_energy:.4f} | Perplexity: {perplexity:.4f}", flush=True)

@@ -17,3 +17,6 @@ class GPTConfig:
     use_lateral: bool = True
     energy_fn_name: str = "scaled_mse"
     eos_token_id: int = None
+    
+    warmup_steps: int = 1000
+    peak_learning_rate: float = 1e-5
