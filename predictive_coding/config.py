@@ -19,3 +19,4 @@ class GPTConfig:
     eos_token_id: int = None
     warmup_steps: int = 1000
     local_learning_rate: float = 1e-5
+    peak_learning_rate: float = None

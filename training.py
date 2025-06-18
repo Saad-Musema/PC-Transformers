@@ -40,9 +40,11 @@ def train(model, dataloader, tokenizer, config):
         input_ids = batch["input_ids"]
         target_ids = batch["target_ids"]
         
-        # Update learning rate (linear warmup)
+        # Update learning rate (linear warmup from local_learning_rate to peak_learning_rate)
         if global_step < config.warmup_steps:
-            lr = global_step / config.warmup_steps * config.local_learning_rate
+            lr = config.local_learning_rate + global_step / config.warmup_steps * (
+                config.peak_learning_rate - config.local_learning_rate
+            )
         else:
             lr = config.peak_learning_rate
 

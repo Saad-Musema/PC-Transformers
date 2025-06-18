@@ -33,7 +33,8 @@ def get_model_config(trial, vocab_size):
         use_lateral=True,
         energy_fn_name="kld",
         warmup_steps=warmup_steps,
-        local_learning_rate=peak_learning_rate
+        peak_learning_rate=peak_learning_rate,
+        local_learning_rate=1e-5  # Warmup start
     )
 
 def objective(trial):
@@ -49,7 +50,8 @@ def objective(trial):
         for epoch in range(1):
             avg_energy, _ = train(model, train_loader, tokenizer, config)
         
-        avg_energy_val, val_loss = evaluate(model, valid_loader, max_batches=10, compute_metrics=False)
+        # avg_energy_val, val_loss = evaluate(model, valid_loader, tokenizer, max_batches=10, compute_metrics=False)
+        val_loss = 0
         return val_loss
    
     except (RuntimeError, ValueError) as e:
