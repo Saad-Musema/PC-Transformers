@@ -1,5 +1,8 @@
 import torch
 import time
+import math
+import os
+import csv
 import torch.nn.functional as F
 from predictive_coding.config import GPTConfig
 from predictive_coding.pc_layer import PCLayer
@@ -11,6 +14,17 @@ from matplotlib.ticker import MaxNLocator
 
 """Usage: python training.py"""
 
+# Define CSV log file
+csv_log_path = "logs/lr_tracking.csv"
+os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
+
+
+# Write CSV header once at the beginning (e.g. in `main()` or at start of train)
+if not os.path.exists(csv_log_path):
+    with open(csv_log_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["global_step", "module_name", "local_lr"])
+        
 def train(model, dataloader, config):
     model.train()
     total_energy = 0.0
@@ -25,16 +39,20 @@ def train(model, dataloader, config):
         
         # Update learning rate (linear warmup)
         if global_step < config.warmup_steps:
-            lr = global_step / config.warmup_steps * config.peak_learning_rate
+            lr = global_step / config.warmup_steps * config.local_learning_rate
         else:
             lr = config.peak_learning_rate
 
             
         # Set this learning rate for each PCLayer
         for module in model.modules():
-            print(f"Module: {module.__class__.__name__}, Local LR: {getattr(module, 'local_lr', None)}")
+            # print(f"Module: {module.__class__.__name__}, Local LR: {getattr(module, 'local_lr', None)}")
             if hasattr(module, 'local_lr'):
                 module.local_lr = lr
+                # Log to CSV
+                with open(csv_log_path, mode='a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([global_step, module.__class__.__name__, module.local_lr])
 
         if global_step % 50 == 0:
             print(f"[Step {global_step}] Learning Rate: {lr:.6f}")
@@ -48,6 +66,8 @@ def train(model, dataloader, config):
             target_ids.view(-1),
             ignore_index=0
         )
+        
+        perplexity = math.exp(ce_loss.item()) if ce_loss.item() < 100 else float("inf")
         
         total_ce_loss += ce_loss.item()
 
@@ -64,7 +84,7 @@ def train(model, dataloader, config):
         batch_count += 1
 
         if (batch_idx + 1) % 10 == 0:
-            print(f"  Batch {batch_idx + 1}/{len(dataloader)} | Batch Energy: {batch_energy:.4f}", flush=True)
+                print(f"  Batch {batch_idx + 1}/{len(dataloader)} | Batch Energy: {batch_energy:.4f} | Perplexity: {perplexity:.4f}", flush=True)
 
         reset_pc_modules(model)
 
@@ -90,7 +110,7 @@ def main():
         num_epochs=5,
         update_bias=True,
         use_lateral = True,
-        energy_fn_name="scaled_mse",
+        energy_fn_name="kld",
         warmup_steps= 1000,
         peak_learning_rate = 1e-5
     )

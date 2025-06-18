@@ -24,7 +24,6 @@ def get_model_config(trial, vocab_size):
         block_size=256,
         n_embed=n_embed,
         dropout=trial.suggest_float('dropout', 0.05, 0.5),
-        local_learning_rate=trial.suggest_float('local_learning_rate', 1e-6, 1e-4, log=True),
         T=trial.suggest_int('T', 5, 10), 
         is_holding_error=True,
         num_heads=num_heads,
@@ -32,9 +31,9 @@ def get_model_config(trial, vocab_size):
         num_epochs=1,
         update_bias=True,
         use_lateral=True,
-        energy_fn_name="scaled_mse",
+        energy_fn_name="kld",
         warmup_steps=warmup_steps,
-        peak_learning_rate=peak_learning_rate
+        local_learning_rate=peak_learning_rate
     )
 
 def objective(trial):
