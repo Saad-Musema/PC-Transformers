@@ -6,7 +6,6 @@ class GPTConfig:
     block_size: int
     n_embed: int =64
     dropout: float = 0.1
-    local_learning_rate: float = 1e-3
     T: int = 10
     is_holding_error: bool = False
     update_bias: bool = True
@@ -17,6 +16,5 @@ class GPTConfig:
     use_lateral: bool = True
     energy_fn_name: str = "scaled_mse"
     eos_token_id: int = None
-    
     warmup_steps: int = 1000
     peak_learning_rate: float = 1e-5

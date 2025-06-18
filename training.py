@@ -25,15 +25,14 @@ def train(model, dataloader, config):
         
         # Update learning rate (linear warmup)
         if global_step < config.warmup_steps:
-            # Linear warmup from base to peak
-            lr = config.local_learning_rate + global_step / config.warmup_steps * (
-                config.peak_learning_rate - config.local_learning_rate
-            )
+            lr = global_step / config.warmup_steps * config.peak_learning_rate
         else:
-            lr = config.peak_learning_rate  # Stay constant after warmup
+            lr = config.peak_learning_rate
+
             
         # Set this learning rate for each PCLayer
         for module in model.modules():
+            print(f"Module: {module.__class__.__name__}, Local LR: {getattr(module, 'local_lr', None)}")
             if hasattr(module, 'local_lr'):
                 module.local_lr = lr
 
@@ -84,7 +83,6 @@ def main():
         block_size= 256,
         n_embed=64,
         dropout=0.1,
-        local_learning_rate=1e-5,
         T=5,
         is_holding_error = True,
         num_heads=2,
@@ -92,7 +90,9 @@ def main():
         num_epochs=5,
         update_bias=True,
         use_lateral = True,
-        energy_fn_name="scaled_mse" 
+        energy_fn_name="scaled_mse",
+        warmup_steps= 1000,
+        peak_learning_rate = 1e-5
     )
 
     model = PCTransformer(config)
