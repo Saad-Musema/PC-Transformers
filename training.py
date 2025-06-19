@@ -17,16 +17,26 @@ from matplotlib.ticker import MaxNLocator
 """Usage: python training.py"""
 
 # Define CSV log file
-csv_log_path = "logs/lr_tracking.csv"
-os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
+# csv_log_path = "logs/lr_tracking.csv"
+# os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
+
+energy_log_path = "logs/energy_perplexity_tracking.csv"
+os.makedirs(os.path.dirname(energy_log_path), exist_ok=True)
 
 
-# Write CSV header once at the beginning (e.g. in `main()` or at start of train)
-if not os.path.exists(csv_log_path):
-    with open(csv_log_path, mode='w', newline='') as f:
+# # Write CSV header once at the beginning (e.g. in `main()` or at start of train)
+# if not os.path.exists(csv_log_path):
+#     with open(csv_log_path, mode='w', newline='') as f:
+#         writer = csv.writer(f)
+#         writer.writerow(["global_step", "module_name", "local_lr"])
+
+# Write header for energy & perplexity log if not exists
+if not os.path.exists(energy_log_path):
+    with open(energy_log_path, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["global_step", "module_name", "local_lr"])
-        
+        writer.writerow(["global_step", "epoch", "batch_idx", "batch_energy", "perplexity", "learning_rate"])
+
+
 def train(model, dataloader, tokenizer, config):
     model.train()
     total_energy = 0.0
@@ -54,10 +64,10 @@ def train(model, dataloader, tokenizer, config):
             # print(f"Module: {module.__class__.__name__}, Local LR: {getattr(module, 'local_lr', None)}")
             if hasattr(module, 'local_lr'):
                 module.local_lr = lr
-                # Log to CSV
-                with open(csv_log_path, mode='a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([global_step, module.__class__.__name__, module.local_lr])
+                # # Log to CSV
+                # with open(csv_log_path, mode='a', newline='') as f:
+                #     writer = csv.writer(f)
+                #     writer.writerow([global_step, module.__class__.__name__, module.local_lr])
 
         if global_step % 50 == 0:
             print(f"[Step {global_step}] Learning Rate: {lr:.6f}")
@@ -97,6 +107,11 @@ def train(model, dataloader, tokenizer, config):
         
         if (batch_idx + 1) % 10 == 0:
             print(f"  Batch {batch_idx + 1}/{len(dataloader)} | Batch Energy: {batch_energy:.4f} | Perplexity: {perplexity:.4f}", flush=True)
+        
+        # Log energy, perplexity, and learning rate
+        with open(energy_log_path, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([global_step, config.num_epochs, batch_idx + 1, batch_energy, perplexity, lr])
 
         reset_pc_modules(model)
 

@@ -18,5 +18,5 @@ class GPTConfig:
     energy_fn_name: str = "scaled_mse"
     eos_token_id: int = None
     warmup_steps: int = 1000
-    local_learning_rate: float = 1e-5
+    local_learning_rate: float = None
     peak_learning_rate: float = None
