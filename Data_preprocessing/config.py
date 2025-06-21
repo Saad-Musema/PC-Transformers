@@ -14,5 +14,5 @@ class Config:
     TOKENIZER_DIR = os.path.join(BASE_DIR, "tokenizer", "outputs")  
    
     # Training
-    BATCH_SIZE = 32
+    BATCH_SIZE = 2
 

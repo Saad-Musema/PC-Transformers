@@ -66,7 +66,7 @@ def main():
 
     config = GPTConfig(
         vocab_size = vocab_size,
-        block_size= 256,
+        block_size= 64,
         n_embed=64,
         dropout=0.1,
         local_learning_rate=1e-5,
@@ -113,8 +113,8 @@ def main():
     # Force x-axis to show only whole numbers
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.tight_layout()
-    plt.savefig('assets/energy_plot.png')
-    plt.show()
+    #plt.savefig('assets/energy_plot.png')
+    #plt.show()
 
 if __name__ == "__main__":
     main()
