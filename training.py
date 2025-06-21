@@ -71,7 +71,7 @@ def train(model, dataloader, tokenizer):
 
 def main():
     tokenizer = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
+    vocab_size = tokenizer.vocab_size()
 
     config = GPTConfig(
         vocab_size = vocab_size,
