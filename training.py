@@ -10,6 +10,8 @@ from model_architecture.pc_t_model import PCTransformer
 from Data_preprocessing.dataloader import get_loaders
 from utils.model_utils import load_tokenizer, reset_pc_modules
 from visualization import plot_metrics
+import warnings
+warnings.filterwarnings("ignore", message="Can't initialize NVML")
 
 """
 Usage: python training.py
@@ -57,14 +59,14 @@ def train(model, dataloader, tokenizer, global_step, device):
         for module in model.modules():
             if isinstance(module, PCLayer) and hasattr(module, "get_energy"):
                 energy = module.get_energy()
-                if energy is not None and not (torch.isnan(torch.tensor(energy)) if isinstance(energy, (int, float)) else False):
+                if energy is not None and not (math.isnan(energy) if isinstance(energy, (int, float)) else False):
                     layer_energies.append(energy)
                 if hasattr(module, "_head_similarity"):
                     _ = module._head_similarity_avg
                     _ = module._head_similarity_max
                     
         if layer_energies:
-            valid_energies = [e for e in layer_energies if not (torch.isnan(torch.tensor(e)) if isinstance(e, (int, float)) else True)]
+            valid_energies = [e for e in layer_energies if not (math.isnan(e) if isinstance(e, (int, float)) else True)]
             batch_energy = sum(valid_energies) / len(valid_energies) if valid_energies else ce_loss.item()
         else:
             batch_energy = ce_loss.item()
