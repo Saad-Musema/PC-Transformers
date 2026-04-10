@@ -116,7 +116,7 @@ def main():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if not dist.is_initialized() or dist.get_rank() == 0:
-        decoded_preds, decoded_targets = text_generation(model, config, device, max_samples=2, use_cache=True)
+        decoded_preds = text_generation(model, config, device, max_samples=2, use_cache=True)
         # if decoded_preds and decoded_targets and local_rank == 0:
         #     compute_text_metrics(decoded_preds, decoded_targets)
     
