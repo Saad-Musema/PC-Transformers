@@ -65,7 +65,7 @@ def tokenizer_training_path():
 
 def build_tokenizer():
     """ This function trains a BPE tokenizer on the given dataset and saves it."""
-    tokenizer = Tokenizer(BPE(unk_token = "<UNK>"))
+    tokenizer = Tokenizer(BPE(unk_token = special_tokens[0]))
     tokenizer.pre_tokenizer = Whitespace()
 
     trainer = BpeTrainer(
