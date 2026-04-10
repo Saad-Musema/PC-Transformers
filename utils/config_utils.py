@@ -69,4 +69,21 @@ def load_best_config():
         if key not in config:
             config[key] = fallback_values[key]
 
+    if os.getenv("PC_SMOKE_TEST") == "1":
+        config.update({
+            "block_size": int(os.getenv("PC_MAX_LEN", "32")),
+            "peak_learning_rate": 0.001,
+            "warmup_steps": 1,
+            "n_embed": 64,
+            "dropout": 0.1,
+            "T": 1,
+            "num_heads": 4,
+            "n_blocks": 2,
+            "lr": 0.0001,
+            "inference_lr": 0.01,
+            "batch_size": int(os.getenv("PC_BATCH_SIZE", "2")),
+            "num_epochs": 1,
+            "use_flash_attention": False,
+        })
+
     return config
