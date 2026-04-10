@@ -1,3 +1,4 @@
+import os
 import torch
 from tokenizers import Tokenizer
 from predictive_coding.config import GPTConfig
@@ -42,6 +43,13 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
     with torch.no_grad():
         model(input_tensor, input_tensor, use_kv_cache=True)
 
+    remaining_context = max(config.block_size - input_tensor.size(1), 0)
+    if max_new_tokens > remaining_context:
+        print(
+            f"Capping generation to {remaining_context} new tokens to stay within block_size={config.block_size}"
+        )
+    max_new_tokens = min(max_new_tokens, remaining_context)
+
     current_input = input_tensor[:, -1:]  # S=1 always
     for step in range(max_new_tokens):
         logits = model(current_input, current_input, use_kv_cache=use_cache)
@@ -51,6 +59,7 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
         
         generated_tokens.append(next_token.item())
         input_tensor = torch.cat((input_tensor, next_token), dim=1)
+        current_input = next_token
         
         if next_token.item() == getattr(config, 'eos_token_id', None):
             break
@@ -116,7 +125,16 @@ def main():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if not dist.is_initialized() or dist.get_rank() == 0:
-        decoded_preds, decoded_targets = text_generation(model, config, device, max_samples=2, use_cache=True)
+        max_samples = int(os.getenv("PC_GENERATE_MAX_SAMPLES", "2"))
+        max_new_tokens = int(os.getenv("PC_GENERATE_MAX_NEW_TOKENS", "200"))
+        decoded_preds = text_generation(
+            model,
+            config,
+            device,
+            max_samples=max_samples,
+            max_new_tokens=max_new_tokens,
+            use_cache=True,
+        )
         # if decoded_preds and decoded_targets and local_rank == 0:
         #     compute_text_metrics(decoded_preds, decoded_targets)
     
