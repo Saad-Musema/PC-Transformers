@@ -1,6 +1,10 @@
+import os
 import torch
 import time
 import logging
+from contextlib import contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
@@ -18,6 +22,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SMOKE_TEST = os.getenv("PC_SMOKE_TEST") == "1"
+DEFAULT_SMOKE_PERCENT = os.getenv("PC_SMOKE_DATA_PERCENT", "1.0")
+SMOKE_SPLIT_PERCENTAGES = {
+    "train": os.getenv("PC_SMOKE_TRAIN_PERCENT", DEFAULT_SMOKE_PERCENT),
+    "valid": os.getenv("PC_SMOKE_VALID_PERCENT", DEFAULT_SMOKE_PERCENT),
+    "test": os.getenv("PC_SMOKE_TEST_PERCENT", DEFAULT_SMOKE_PERCENT),
+}
+
+
+def load_split_text(split_name, path):
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset file not found at: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    if SMOKE_TEST:
+        percent = float(SMOKE_SPLIT_PERCENTAGES[split_name])
+        if percent <= 0:
+            raise ValueError(f"Smoke dataset percentage for {split_name} must be positive, got {percent}")
+        char_count = max(1, int(len(text) * (percent / 100.0)))
+        logger.info(
+            "Smoke mode truncating %s split to %.3f%% of source text (%s chars)",
+            split_name,
+            percent,
+            char_count,
+        )
+        return text[:char_count]
+    return text
+
+
+@contextmanager
+def tokenizer_training_path():
+    if not SMOKE_TEST:
+        yield train_path
+        return
+
+    train_text = load_split_text("train", train_path)
+    with TemporaryDirectory(prefix="pc-transformers-smoke-") as temp_dir:
+        temp_train_path = Path(temp_dir) / train_path.name
+        temp_train_path.write_text(train_text, encoding="utf-8")
+        yield temp_train_path
+
 def build_tokenizer():
     """ This function trains a BPE tokenizer on the given dataset and saves it."""
     tokenizer = Tokenizer(BPE(unk_token = "<UNK>"))
@@ -28,13 +73,12 @@ def build_tokenizer():
         vocab_size = vocab_size
         )
 
-    paths = [train_path, valid_path, test_path]
-    for path in paths:
-        if not path.exists():
-            raise FileNotFoundError(f"Dataset file not found at: {path}")
+    _ = load_split_text("valid", valid_path)
+    _ = load_split_text("test", test_path)
 
     start_time = time.perf_counter()
-    tokenizer.train(files=[str(train_path)], trainer=trainer)
+    with tokenizer_training_path() as training_path:
+        tokenizer.train(files=[str(training_path)], trainer=trainer)
     elapsed = time.perf_counter() - start_time
 
     tokenizer.save(str(tokenizer_path))
@@ -57,8 +101,7 @@ def encode_and_save(tokenizer):
     }
 
     for split_name, path in splits.items():
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
+        text = load_split_text(split_name, path)
 
         start_time = time.perf_counter()
         encoded_ids = tokenizer.encode(text).ids  
