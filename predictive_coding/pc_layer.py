@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from utils.pc_utils import (
     x_init,
@@ -44,6 +44,9 @@ class PCLayer(nn.Module):
         self._error_cache: Dict[str, torch.Tensor] = {}
         self._energy = 0.0
         self._errors = []
+        self.debug_name = "pc_layer"
+        self.layer_type = "unknown"
+        self._debugger: Optional[Callable[[dict], None]] = None
     
     def register_lateral(self, layer_type: str, size: int):
         """Create and register lateral connections for layer_type."""
@@ -57,6 +60,96 @@ class PCLayer(nn.Module):
     
     def _get_cached_state(self, layer_type: str):
         return self._x_cache.get(layer_type, None)
+
+    def set_debugger(self, debugger: Optional[Callable[[dict], None]]):
+        """Attach an optional debug callback for step-level tracing."""
+        self._debugger = debugger
+
+    @staticmethod
+    def _tensor_abs_mean(tensor: Optional[torch.Tensor]) -> Optional[float]:
+        if tensor is None:
+            return None
+        return float(tensor.detach().abs().mean().item())
+
+    @staticmethod
+    def _parameter_snapshot(
+        layer: Optional[nn.Module] = None,
+        proj_layers: Optional[dict] = None,
+    ) -> Dict[str, torch.Tensor]:
+        stats: Dict[str, torch.Tensor] = {}
+
+        if layer is not None and hasattr(layer, "weight") and layer.weight is not None:
+            stats["weight"] = layer.weight.detach().clone()
+            if getattr(layer, "bias", None) is not None:
+                stats["bias"] = layer.bias.detach().clone()
+
+        if proj_layers is not None:
+            for name, module in proj_layers.items():
+                if module is None or not hasattr(module, "weight") or module.weight is None:
+                    continue
+                stats[f"{name}.weight"] = module.weight.detach().clone()
+                if getattr(module, "bias", None) is not None:
+                    stats[f"{name}.bias"] = module.bias.detach().clone()
+
+        return stats
+
+    @staticmethod
+    def _parameter_change_stats(
+        before: Dict[str, torch.Tensor],
+        after: Dict[str, torch.Tensor],
+    ) -> Dict[str, Dict[str, float]]:
+        stats: Dict[str, Dict[str, float]] = {}
+
+        for key in sorted(set(before) | set(after)):
+            if key not in before or key not in after:
+                continue
+
+            before_tensor = before[key]
+            after_tensor = after[key]
+            delta = after_tensor - before_tensor
+            stats[key] = {
+                "before_abs_mean": float(before_tensor.abs().mean().item()),
+                "after_abs_mean": float(after_tensor.abs().mean().item()),
+                "delta_abs_mean": float(delta.abs().mean().item()),
+                "delta_norm": float(delta.norm().item()),
+            }
+
+        return stats
+
+    def _emit_debug(
+        self,
+        *,
+        t: int,
+        target_activity: torch.Tensor,
+        mu: torch.Tensor,
+        error: torch.Tensor,
+        td_err: Optional[torch.Tensor],
+        x_before: Optional[torch.Tensor],
+        x_after: Optional[torch.Tensor],
+        energy: float,
+        param_changes: Dict[str, Dict[str, float]],
+    ) -> None:
+        if self._debugger is None:
+            return
+
+        self._debugger(
+            {
+                "layer_name": self.debug_name,
+                "layer_type": self.layer_type,
+                "pc_step": t,
+                "target_abs_mean": self._tensor_abs_mean(target_activity),
+                "mu_abs_mean": self._tensor_abs_mean(mu),
+                "error_abs_mean": self._tensor_abs_mean(error),
+                "td_err_abs_mean": self._tensor_abs_mean(td_err),
+                "x_before_abs_mean": self._tensor_abs_mean(x_before),
+                "x_after_abs_mean": self._tensor_abs_mean(x_after),
+                "x_delta_abs_mean": self._tensor_abs_mean(
+                    None if x_before is None or x_after is None else x_after - x_before
+                ),
+                "energy": energy,
+                "param_changes": param_changes,
+            }
+        )
     
     def forward(
         self,
@@ -73,12 +166,16 @@ class PCLayer(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         rope_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
         flash: bool = False,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # ADD THIS
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False, 
+        output_proj: Optional[nn.Module] = None,
+        attn_lr_multiplier: float = 1.0,
     ):
         """Perform one predictive coding inference step."""
         self._reset_step_state()
         x = self._get_cached_state(layer_type)
+        x_before = x.detach().clone() if isinstance(x, torch.Tensor) and self._debugger is not None else None
+        params_before = self._parameter_snapshot(layer=layer, proj_layers=proj_layers) if self._debugger is not None else {}
 
         if rope_cache is not None:
             self.rope_cache = rope_cache
@@ -109,6 +206,20 @@ class PCLayer(nn.Module):
             energy, step_errors = finalize_step(mu, target_activity, error, t, layer_type, self.energy_fn_name)
             self._energy += energy
             self._errors.extend(step_errors)
+            self._emit_debug(
+                t=t,
+                target_activity=target_activity,
+                mu=mu,
+                error=error,
+                td_err=td_err,
+                x_before=None,
+                x_after=None,
+                energy=energy,
+                param_changes=self._parameter_change_stats(
+                    params_before,
+                    self._parameter_snapshot(layer=None, proj_layers=layer),
+                ),
+            )
             return mu_word
         
         elif layer_type == "attn":
@@ -135,6 +246,8 @@ class PCLayer(nn.Module):
                 flash=flash, 
                 kv_cache=kv_cache,  
                 use_cache=use_cache,
+                output_proj=output_proj,
+                attn_lr_multiplier=attn_lr_multiplier,
             )
             # Store cache for retrieval
             if use_cache:
@@ -172,6 +285,20 @@ class PCLayer(nn.Module):
 
         # update x cache
         self._x_cache[layer_type] = x
+        self._emit_debug(
+            t=t,
+            target_activity=target_activity,
+            mu=mu,
+            error=error,
+            td_err=td_err,
+            x_before=x_before,
+            x_after=x,
+            energy=energy,
+            param_changes=self._parameter_change_stats(
+                params_before,
+                self._parameter_snapshot(layer=layer, proj_layers=proj_layers),
+            ),
+        )
         return x, mu
 
     def init_x(
@@ -253,6 +380,7 @@ class PCLayer(nn.Module):
     def clear_errors(self):
         """Clear the stored errors for the layer."""
         self._errors = []
+        self._error_cache.clear()
         
     def set_learning_rate(self, lr: float):
         """Set the local learning rate for the layer."""
