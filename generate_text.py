@@ -1,16 +1,14 @@
 import torch
 from tokenizers import Tokenizer
 from predictive_coding.config import GPTConfig
-from utils.model_utils import load_model, decode_ids, compute_text_metrics
+from utils.model_utils import load_model, decode_ids
 from utils.config_utils import load_best_config
 from utils.model_utils import set_seed
 import torch.nn.functional as F
-from data_preparation.dataloader import get_loaders
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from utils.device_utils import setup_device
 import argparse
-from data_preparation.config import vocab_size
+from data_preparation.config import vocab_size, tokenizer_path
 
 """
 This script generates text using the trained predictive coding transformer model.
@@ -19,10 +17,11 @@ It takes a prompt, generates new tokens, and prints the prompt, target, and gene
 Usage: torchrun --nproc-per-node=<NUM_GPU> generate_text.py
 
 """
-local_rank, device, use_ddp = setup_device()
+local_rank, device, use_distributed = setup_device()
 
 def generate_text(model, config, input_ids, max_new_tokens, temperature, device = None, use_cache=True):
     model.eval()
+    base_model = model.module if hasattr(model, 'module') else model
     
     if input_ids is None:
         start_token = getattr(config, "start_token_id", 0)  
@@ -32,7 +31,7 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
 
     # Clear KV cache at the start
     if use_cache:
-        for module in model.modules():
+        for module in base_model.modules():
             if hasattr(module, 'clear_kv_cache'):
                 module.clear_kv_cache()
     
@@ -44,6 +43,12 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
 
     current_input = input_tensor[:, -1:]  # S=1 always
     for step in range(max_new_tokens):
+        # For first token or with cache, pass full or last token
+        current_input = input_tensor[:, -config.block_size:] if input_tensor.size(1) > config.block_size else input_tensor
+
+        if hasattr(base_model, "set_debug_context"):
+            base_model.set_debug_context(mode="generate", batch_idx=step, generation_step=step)
+
         logits = model(current_input, current_input, use_kv_cache=use_cache)
         logits = logits[:, -1, :] / temperature
         probs = F.softmax(logits, dim=-1)
@@ -60,7 +65,7 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
 def text_generation(model, config, device = None,  max_samples=2, max_new_tokens=200, use_cache = True):
     decoded_preds = []
 
-    tokenizer = Tokenizer.from_file("data_preparation/tokenizer.json")
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
     
     for sample_idx in range(max_samples):
         generated_ids = generate_text(model, config, input_ids=None, max_new_tokens=max_new_tokens, temperature=0.7, device=device, use_cache=use_cache)
@@ -77,9 +82,13 @@ def main():
     set_seed(42)
     parser = argparse.ArgumentParser()
     parser.add_argument('--flash', action='store_true', help='Enable FlashAttention for attention layers')
+    parser.add_argument('--debug-layers', action='store_true', help='Log per-layer predictive-coding stats')
+    parser.add_argument('--debug-max-batches', type=int, default=5, help='Number of generation steps to trace when layer debug is enabled')
+    parser.add_argument('--debug-max-steps', type=int, default=None, help='Maximum predictive-coding iterations to trace')
+    parser.add_argument('--debug-rank', type=int, default=0, help='Distributed rank that emits layer debug logs')
     args = parser.parse_args()
 
-    if use_ddp and not dist.is_initialized():
+    if use_distributed and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
 
     print(f"[Rank {local_rank}] Using device: {device}")
@@ -105,22 +114,23 @@ def main():
         output_energy_fn_name=best_config["output_energy_fn_name"],
         combined_internal_weight=best_config["combined_internal_weight"],
         combined_output_weight=best_config["combined_output_weight"],
-        use_flash_attention=best_config["use_flash_attention"],
+        use_flash_attention=args.flash or best_config["use_flash_attention"],
         alpha = best_config["alpha"]    
     )
     
     model_path = "checkpoints/final_model.pt"
     model = load_model(model_path, config)
     model = model.to(device)
-    if use_ddp:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    model.configure_layer_debug(
+        enabled=args.debug_layers and (not dist.is_initialized() or dist.get_rank() == args.debug_rank),
+        max_batches=args.debug_max_batches,
+        max_steps=args.debug_max_steps,
+    )
 
     if not dist.is_initialized() or dist.get_rank() == 0:
-        decoded_preds, decoded_targets = text_generation(model, config, device, max_samples=2, use_cache=True)
-        # if decoded_preds and decoded_targets and local_rank == 0:
-        #     compute_text_metrics(decoded_preds, decoded_targets)
+        text_generation(model, config, device, max_samples=2, use_cache=True)
     
-    if use_ddp and dist.is_initialized():
+    if use_distributed and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
 
