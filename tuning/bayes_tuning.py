@@ -105,17 +105,17 @@ if __name__ == "__main__":
             stream=sys.stdout
         )
     
-    local_rank, device, use_ddp = setup_device()
+    local_rank, device, use_distributed = setup_device()
     
-    if use_ddp and not dist.is_initialized():
+    if use_distributed and not dist.is_initialized():
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend="nccl")
 
-    if use_ddp:
+    if use_distributed:
         dist.barrier()
     
     study = run_tuning(n_trials= 70, study_name="bayesian_tuning", local_rank=local_rank, device=device, flash=args.flash, enable_batch_logging=args.log_batches)
 
-    if use_ddp and dist.is_initialized():
+    if use_distributed and dist.is_initialized():
         dist.barrier() 
         dist.destroy_process_group()

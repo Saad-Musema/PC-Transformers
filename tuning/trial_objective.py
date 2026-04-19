@@ -11,7 +11,6 @@ from predictive_coding.config import GPTConfig
 from tuning.config import get_dynamic_model_config, update_global_config
 from tuning.tuning_logs import log_trial_to_detailed_log, trial_batch_logger
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from data_preparation.dataloader import get_loaders
 from data_preparation.config import vocab_size
@@ -60,14 +59,11 @@ def objective(trial, device = None, flash=False, enable_batch_logging=False):
         update_global_config(config.__dict__)
 
         model = PCTransformer(config).to(device)  
-       
-        if dist.is_initialized():
-            if device.type == "cuda":
-                model = DDP(model, device_ids=[device.index], output_device=device.index)
-            else:
-                model = DDP(model)
-       
-        train_loader, valid_loader, _ = get_loaders(distributed=dist.is_initialized())
+
+        train_loader, valid_loader, _ = get_loaders(
+            distributed=dist.is_initialized(),
+            batch_size=config.batch_size,
+        )
         
         if len(train_loader) == 0 or len(valid_loader) == 0:
             return float("inf")
