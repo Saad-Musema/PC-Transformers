@@ -3,6 +3,8 @@ from typing import List, Callable, Any, Optional
 import os
 import gc
 import torch.distributed as dist
+
+
 def create_streams_or_futures(device: torch.device, num_streams: int) -> tuple[bool, List[Any]]:
     """
     Creates CUDA streams or an empty futures list based on the device.
@@ -20,11 +22,14 @@ def create_streams_or_futures(device: torch.device, num_streams: int) -> tuple[b
     if use_cuda:
         return True, [torch.cuda.Stream(device=device) for _ in range(num_streams)]
     return False, []
+
+
 def execute_parallel(
     use_cuda: bool,
     streams_or_futures: List[Any],
     forward_fn: Callable,
     *args,
+    stream_index: Optional[int] = None,
     **kwargs
 ) -> Optional[Any]:
     """
@@ -41,7 +46,11 @@ def execute_parallel(
         Optional[Any]: The future object if using torch.jit.fork, None if using CUDA streams.
     """
     if use_cuda:
-        stream_idx = len(streams_or_futures) - len([s for s in streams_or_futures if not s]) - 1
+        if not streams_or_futures:
+            forward_fn(*args, **kwargs)
+            return None
+
+        stream_idx = 0 if stream_index is None else stream_index % len(streams_or_futures)
         with torch.cuda.stream(streams_or_futures[stream_idx]):
             forward_fn(*args, **kwargs)
         return None
@@ -49,6 +58,7 @@ def execute_parallel(
         future = torch.jit.fork(forward_fn, *args, **kwargs)
         streams_or_futures.append(future)
         return future
+
 
 def synchronize_execution(use_cuda: bool, streams_or_futures: List[Any]) -> None:
     """
@@ -69,12 +79,32 @@ def synchronize_execution(use_cuda: bool, streams_or_futures: List[Any]) -> None
             except Exception as e:
                 print(f"Error in parallel inference step: {e}")
         streams_or_futures.clear()  # Clear futures after completion
+
+
 def cleanup_memory():
     """Comprehensive memory cleanup"""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+
+def synchronize_model_parameters(module: torch.nn.Module) -> None:
+    """
+    Average parameters across ranks after local in-forward updates.
+    """
+    if not dist.is_initialized():
+        return
+
+    world_size = dist.get_world_size()
+    if world_size <= 1:
+        return
+
+    with torch.no_grad():
+        for param in module.parameters():
+            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+            param.data.div_(world_size)
+
 
 def setup_device():
     if "WORLD_SIZE" in os.environ and torch.cuda.is_available():
