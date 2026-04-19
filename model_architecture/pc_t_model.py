@@ -1,8 +1,9 @@
-from logging import config
 import torch
 import torch.nn as nn
+from typing import Optional
 from .embedding import Embedding_Layer
 from .transformer_block import TransformerBlock
+from predictive_coding.pc_layer import PCLayer
 from utils.pc_utils import ids_to_one_hot
 from .output import OutputLayer
 from utils.device_utils import create_streams_or_futures, execute_parallel, synchronize_execution
@@ -29,6 +30,14 @@ class PCTransformer(nn.Module):
         self.embedding = Embedding_Layer(config)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_blocks)])
         self.output = OutputLayer(config)
+        self._layer_debug_enabled = False
+        self._layer_debug_log_fn = print
+        self._layer_debug_max_batches = 1
+        self._layer_debug_max_steps = None
+        self._layer_debug_context = {}
+
+        self._assign_pc_metadata()
+        self.register_all_lateral_weights()
 
     def register_all_lateral_weights(self):
         """
@@ -37,16 +46,106 @@ class PCTransformer(nn.Module):
         """
         for block in self.blocks:
             block.attn.pc_qkv.register_lateral("attn", block.attn.q.in_features)
-            block.attn.pc_output.register_lateral("linear", block.attn.output.in_features)
+            block.attn.pc_output.register_lateral("linear_attn", block.attn.output.in_features)
             block.mlp.pc_layer1.register_lateral("fc1", block.mlp.fc1.in_features)
-            block.mlp.pc_layer2.register_lateral("linear", block.mlp.fc2.in_features)
-        self.output.pc_layer.register_lateral("linear", self.output.output.in_features)
+            block.mlp.pc_layer2.register_lateral("fc2", block.mlp.fc2.in_features)
+        self.output.pc_layer.register_lateral("linear_output", self.output.output.in_features)
 
         for module in self.modules():
-            if hasattr(module, 'W_latents'):
-                for key in module.W_latents:
-                    if module.W_latents[key] is not None:
-                        module.W_latents[key] = module.W_latents[key].to(next(self.parameters()).device)
+            if isinstance(module, PCLayer):
+                for lateral_conn in module.lateral_connections.values():
+                    lateral_conn.to(next(self.parameters()).device)
+
+    def _assign_pc_metadata(self):
+        self.embedding.pc_layer.layer_type = "embed"
+        self.embedding.pc_layer.debug_name = "embedding"
+
+        for idx, block in enumerate(self.blocks):
+            block.attn.pc_qkv.layer_type = "attn"
+            block.attn.pc_qkv.debug_name = f"block_{idx}.attn.qkv"
+            block.attn.pc_output.layer_type = "linear_attn"
+            block.attn.pc_output.debug_name = f"block_{idx}.attn.output"
+            block.mlp.pc_layer1.layer_type = "fc1"
+            block.mlp.pc_layer1.debug_name = f"block_{idx}.mlp.fc1"
+            block.mlp.pc_layer2.layer_type = "fc2"
+            block.mlp.pc_layer2.debug_name = f"block_{idx}.mlp.fc2"
+
+        self.output.pc_layer.layer_type = "linear_output"
+        self.output.pc_layer.debug_name = "output"
+
+        for module in self.modules():
+            if isinstance(module, PCLayer):
+                module.set_debugger(self._emit_layer_debug)
+
+    def configure_layer_debug(
+        self,
+        *,
+        enabled: bool,
+        log_fn=None,
+        max_batches: int = 1,
+        max_steps: Optional[int] = None,
+    ) -> None:
+        self._layer_debug_enabled = enabled
+        self._layer_debug_log_fn = log_fn or print
+        self._layer_debug_max_batches = max_batches
+        self._layer_debug_max_steps = max_steps
+
+    def set_debug_context(self, **context) -> None:
+        self._layer_debug_context = context
+
+    def _should_log_layer(self, record: dict) -> bool:
+        if not self._layer_debug_enabled:
+            return False
+
+        batch_idx = self._layer_debug_context.get("batch_idx")
+        if (
+            self._layer_debug_max_batches is not None
+            and batch_idx is not None
+            and batch_idx >= self._layer_debug_max_batches
+        ):
+            return False
+
+        if self._layer_debug_max_steps is not None and record["pc_step"] >= self._layer_debug_max_steps:
+            return False
+
+        return True
+
+    def _format_param_delta(self, key: str, stats: dict) -> str:
+        return (
+            f"{key}:{stats['before_abs_mean']:.6f}->{stats['after_abs_mean']:.6f} "
+            f"(d|.|={stats['delta_abs_mean']:.3e}, dnorm={stats['delta_norm']:.3e})"
+        )
+
+    def _emit_layer_debug(self, record: dict) -> None:
+        if not self._should_log_layer(record):
+            return
+
+        mode = self._layer_debug_context.get("mode", "run")
+        batch_idx = self._layer_debug_context.get("batch_idx")
+        global_step = self._layer_debug_context.get("global_step")
+        pieces = [
+            f"[layer-debug][{mode}]",
+            f"batch={batch_idx}" if batch_idx is not None else None,
+            f"global_step={global_step}" if global_step is not None else None,
+            f"pc_step={record['pc_step']}",
+            record["layer_name"],
+            f"target|.|={record['target_abs_mean']:.4f}" if record["target_abs_mean"] is not None else None,
+            f"mu|.|={record['mu_abs_mean']:.4f}" if record["mu_abs_mean"] is not None else None,
+            f"err|.|={record['error_abs_mean']:.4f}" if record["error_abs_mean"] is not None else None,
+            f"td|.|={record['td_err_abs_mean']:.4f}" if record["td_err_abs_mean"] is not None else None,
+            (
+                f"x|.|={record['x_before_abs_mean']:.4f}->{record['x_after_abs_mean']:.4f}"
+                if record["x_before_abs_mean"] is not None and record["x_after_abs_mean"] is not None
+                else None
+            ),
+            f"dx|.|={record['x_delta_abs_mean']:.4f}" if record["x_delta_abs_mean"] is not None else None,
+            f"energy={record['energy']:.4f}",
+        ]
+
+        for key, stats in record["param_changes"].items():
+            pieces.append(self._format_param_delta(key, stats))
+
+        self._layer_debug_log_fn(" | ".join(piece for piece in pieces if piece is not None))
 
     def forward(self, target_ids, input_ids, use_kv_cache=False):
         """
@@ -146,13 +245,24 @@ class PCTransformer(nn.Module):
 
         # Initialize streams or futures for parallel execution
         use_cuda, streams_or_futures = create_streams_or_futures(device, len(self.blocks) * 4 + 2)
+        stream_cursor = 0
+
+        def launch(forward_fn, *args, **kwargs):
+            nonlocal stream_cursor
+            execute_parallel(
+                use_cuda,
+                streams_or_futures,
+                forward_fn,
+                *args,
+                stream_index=stream_cursor,
+                **kwargs,
+            )
+            stream_cursor += 1
 
         for t in range(self.config.T):
             # Execute output layer
             td_mlp2 = self.blocks[-1].mlp.pc_layer2.get_td_err("fc2") if t > 0 else None
-            execute_parallel(
-                use_cuda,
-                streams_or_futures,
+            launch(
                 self.output.pc_layer.forward,
                 target_activity=target_logits,
                 layer_type="linear_output",
@@ -184,9 +294,7 @@ class PCTransformer(nn.Module):
                 td_mlp1 = block.mlp.pc_layer1.get_td_err("fc1") if t > 0 else None
 
                 # Execute MLP layer 2
-                execute_parallel(
-                    use_cuda,
-                    streams_or_futures,
+                launch(
                     block.mlp.pc_layer2.forward,
                     target_activity=next_target,
                     layer_type="fc2",
@@ -205,9 +313,7 @@ class PCTransformer(nn.Module):
                 td_attn_op = block.attn.pc_output.get_td_err("linear_attn") if t > 0 else None
 
                 # Execute MLP layer 1
-                execute_parallel(
-                    use_cuda,
-                    streams_or_futures,
+                launch(
                     block.mlp.pc_layer1.forward,
                     target_activity=block.mlp.pc_layer2.get_x("fc2"),
                     layer_type="fc1",
@@ -233,9 +339,7 @@ class PCTransformer(nn.Module):
 
     
                 # Execute attention output
-                execute_parallel(
-                    use_cuda,
-                    streams_or_futures,
+                launch(
                     block.attn.pc_output.forward,
                     target_activity=block.mlp.pc_layer1.get_x("fc1"),
                     layer_type="linear_attn",
@@ -253,9 +357,7 @@ class PCTransformer(nn.Module):
                 )
 
                 # Execute attention QKV
-                execute_parallel(
-                    use_cuda,
-                    streams_or_futures,
+                launch(
                     block.attn.pc_qkv.forward,
                     target_activity=block.attn.pc_output.get_x("linear_attn"),
                     layer_type="attn",
@@ -271,7 +373,9 @@ class PCTransformer(nn.Module):
                     flash=getattr(self.config, 'use_flash_attention', False),
                     use_cache=use_kv_cache,  
                     kv_cache=block.attn.kv_cache if use_kv_cache else None, 
-                    rope_cache=self.rope_cache
+                    rope_cache=self.rope_cache,
+                    output_proj=block.attn.output,
+                    attn_lr_multiplier=getattr(self.config, 'attn_lr_multiplier', 1.0),
                 )
 
                 # Update cache after last iteration
@@ -279,9 +383,7 @@ class PCTransformer(nn.Module):
                     block.attn.kv_cache = block.attn.pc_qkv._last_kv_cache
     
             # Execute embedding layer
-            execute_parallel(
-                use_cuda,
-                streams_or_futures,
+            launch(
                 self.embedding.pc_layer.forward,
                 target_activity=self.blocks[0].attn.pc_qkv.get_x("attn"),
                 layer_type="embed",
@@ -290,7 +392,7 @@ class PCTransformer(nn.Module):
                 requires_update=True,
                 td_err = None,
                 layer={"word": self.embedding.word_embeddings, "pos": self.embedding.position_embeddings},
-                layer_norm= block.ln2,
+                layer_norm=self.embedding.rms_norm,
                 proj_layers=None,
                 input_ids=input_ids,
                 position_ids=position_ids,
