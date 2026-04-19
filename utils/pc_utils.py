@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gc
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Dict
 from utils.attention_utils import apply_flash_attention, apply_standard_attention
     
 def x_init(batch_size: int, seq_len: int, embedding_size: int, device: torch.device = None) -> torch.Tensor:
@@ -59,6 +59,37 @@ def rotate_half_transpose(x: torch.Tensor) -> torch.Tensor:
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((x2, -x1), dim=-1)
 
+
+def assert_finite_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+    """Raise immediately when a tensor first becomes non-finite."""
+    if tensor is None or not torch.is_tensor(tensor):
+        return
+
+    if torch.isfinite(tensor).all():
+        return
+
+    nan_count = int(torch.isnan(tensor).sum().item())
+    inf_count = int(torch.isinf(tensor).sum().item())
+    raise FloatingPointError(
+        f"Non-finite tensor detected in {name}: shape={tuple(tensor.shape)} "
+        f"nan={nan_count} inf={inf_count}"
+    )
+
+
+def assert_finite_named_tensors(context: str, **tensors: Optional[torch.Tensor]) -> None:
+    for name, tensor in tensors.items():
+        assert_finite_tensor(f"{context}.{name}", tensor)
+
+
+def assert_finite_module_params(context: str, modules: Dict[str, nn.Module]) -> None:
+    for name, module in modules.items():
+        if module is None:
+            continue
+        if hasattr(module, "weight") and module.weight is not None:
+            assert_finite_tensor(f"{context}.{name}.weight", module.weight)
+        if hasattr(module, "bias") and module.bias is not None:
+            assert_finite_tensor(f"{context}.{name}.bias", module.bias)
+
 def step_embed(
     t: int,
     T: int,
@@ -87,13 +118,21 @@ def step_embed(
     mu_norm = layer_norm(mu) if layer_norm is not None else mu
 
     error = target - mu_norm
+    assert_finite_named_tensors(
+        f"{layer_type}.pre_update",
+        mu=mu,
+        err=error,
+    )
+    assert_finite_tensor(f"{layer_type}.pre_update.word_weight", word_layer.weight)
         
     if requires_update: 
         with torch.no_grad():
             flat_input_ids = input_ids.reshape(-1)
             flat_update = error.reshape(-1, error.size(-1))
             delta = torch.clamp(local_lr * flat_update, -0.01, 0.01)
+            assert_finite_tensor(f"{layer_type}.pre_update.delta", delta)
             word_layer.weight.data.index_add_(0, flat_input_ids, delta)
+            assert_finite_tensor(f"{layer_type}.post_update.word_weight", word_layer.weight)
             
     return mu, mu_word, error
     
@@ -146,6 +185,17 @@ def step_linear(
         error_proj= dE_dmu @ layer.weight
             
     error = error_proj- td_err if td_err is not None else error_proj  
+    assert_finite_named_tensors(
+        f"{layer_type}.pre_x_update",
+        x=x,
+        mu=mu,
+        err=error,
+        td_err=td_err,
+    )
+    if layer is not None:
+        assert_finite_tensor(f"{layer_type}.pre_x_update.weight", layer.weight)
+        if layer.bias is not None:
+            assert_finite_tensor(f"{layer_type}.pre_x_update.bias", layer.bias)
    
     if lateral_conn is not None:
         x = x + inference_lr * lateral_conn.forward(x, error)
@@ -155,15 +205,30 @@ def step_linear(
         x = x + inference_lr * error 
 
     x = torch.clamp(x, -abs(clamp_value), abs(clamp_value))
+    assert_finite_named_tensors(
+        f"{layer_type}.post_x_update",
+        x=x,
+        mu=mu,
+        err=error,
+        td_err=td_err,
+    )
     
     # parameter updates for the layer
     if requires_update:
         delta_W = local_lr * torch.einsum("bsv, bsh -> vh", dE_dmu, x_input.detach())
         delta_W = torch.clamp(delta_W, -0.01, 0.01)
+        assert_finite_tensor(f"{layer_type}.pre_param_update.delta_W", delta_W)
+        if layer is not None:
+            assert_finite_tensor(f"{layer_type}.pre_param_update.weight", layer.weight)
         layer.weight.data.add_(delta_W)
+        assert_finite_tensor(f"{layer_type}.post_param_update.weight", layer.weight)
         if layer.bias is not None and update_bias:
             delta_b = local_lr * dE_dmu.mean(dim=(0, 1))
-            layer.bias.data.add_(torch.clamp(delta_b, -0.01, 0.01))
+            delta_b = torch.clamp(delta_b, -0.01, 0.01)
+            assert_finite_tensor(f"{layer_type}.pre_param_update.delta_b", delta_b)
+            assert_finite_tensor(f"{layer_type}.pre_param_update.bias", layer.bias)
+            layer.bias.data.add_(delta_b)
+            assert_finite_tensor(f"{layer_type}.post_param_update.bias", layer.bias)
 
     return x, mu, bu_err
 
@@ -189,6 +254,8 @@ def step_attn(
     flash: bool = False,
     kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     use_cache: bool = False,
+    output_proj: Optional[nn.Module] = None,
+    attn_lr_multiplier: float = 1.0,
     ):
     """
     Predictive coding step for attention using Sine-Cosine RoPE.
@@ -242,9 +309,19 @@ def step_attn(
         mu_heads, attn_weights, attn_scores = apply_standard_attention(Q, K, V, mask=causal_mask)
     
     mu = mu_heads.transpose(1, 2).contiguous().view(B, S, E)
+    if output_proj is not None:
+        mu = output_proj(mu)
     bu_err = target - mu
     
     error = bu_err - td_err if td_err is not None else bu_err  
+    assert_finite_named_tensors(
+        f"{layer_type}.pre_x_update",
+        x=x,
+        mu=mu,
+        err=error,
+        td_err=td_err,
+    )
+    assert_finite_module_params(f"{layer_type}.pre_x_update", proj_layers)
      
     scale = 1.0 / (head_dim ** 0.5)
 
@@ -313,36 +390,52 @@ def step_attn(
         x = x + inference_lr * delta_x
 
     x = torch.clamp(x, -abs(clamp_value), abs(clamp_value))
+    assert_finite_named_tensors(
+        f"{layer_type}.post_x_update",
+        x=x,
+        mu=mu,
+        err=error,
+        td_err=td_err,
+    )
+    assert_finite_module_params(f"{layer_type}.post_x_update", proj_layers)
 
     if requires_update:
+        attn_local_lr = local_lr * attn_lr_multiplier
         with torch.no_grad():
             for h in range(num_heads):
-                dW_q = torch.einsum("bte,btd->ed", x_norm, dE_dQ_raw[:, h])
-                dW_k = torch.einsum("bte,btd->ed", x_norm, dE_dK_raw[:, h])
-                dW_v = torch.einsum("bte,btd->ed", x_norm, dE_dV[:, h])
-                
-                dW_q = torch.clamp(dW_q, -0.01, 0.01)
-                dW_k = torch.clamp(dW_k, -0.01, 0.01)
-                dW_v = torch.clamp(dW_v, -0.01, 0.01)
-                
-                q_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_q
-                k_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_k
-                v_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_v
+                dW_q = torch.clamp(attn_local_lr * torch.einsum("bte,btd->ed", x_norm, dE_dQ_raw[:, h]), -0.01, 0.01)
+                dW_k = torch.clamp(attn_local_lr * torch.einsum("bte,btd->ed", x_norm, dE_dK_raw[:, h]), -0.01, 0.01)
+                dW_v = torch.clamp(attn_local_lr * torch.einsum("bte,btd->ed", x_norm, dE_dV[:, h]), -0.01, 0.01)
+
+                assert_finite_named_tensors(
+                    f"{layer_type}.pre_param_update.head_{h}",
+                    dW_q=dW_q,
+                    dW_k=dW_k,
+                    dW_v=dW_v,
+                )
+                assert_finite_module_params(f"{layer_type}.pre_param_update.head_{h}", proj_layers)
+
+                q_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += dW_q
+                k_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += dW_k
+                v_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += dW_v
+
+                assert_finite_module_params(f"{layer_type}.post_param_update.head_{h}", proj_layers)
                 if update_bias:
                     if q_proj.bias is not None:
-                        db_q = dE_dQ_raw[:, h].mean(dim=(0, 1))
-                        db_q = torch.clamp(db_q, -0.01, 0.01)
-                        q_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_q
+                        db_q = attn_local_lr * dE_dQ_raw[:, h].mean(dim=(0, 1))
+                        assert_finite_tensor(f"{layer_type}.pre_param_update.head_{h}.db_q", db_q)
+                        q_proj.bias.data[h*head_dim:(h+1)*head_dim] += db_q
                     
                     if k_proj.bias is not None:
-                        db_k = dE_dK_raw[:, h].mean(dim=(0, 1))
-                        db_k = torch.clamp(db_k, -0.01, 0.01)
-                        k_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_k
+                        db_k = attn_local_lr * dE_dK_raw[:, h].mean(dim=(0, 1))
+                        assert_finite_tensor(f"{layer_type}.pre_param_update.head_{h}.db_k", db_k)
+                        k_proj.bias.data[h*head_dim:(h+1)*head_dim] += db_k
                     
                     if v_proj.bias is not None:
-                        db_v = dE_dV[:, h].mean(dim=(0, 1))
-                        db_v = torch.clamp(db_v, -0.01, 0.01)
-                        v_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_v
+                        db_v = attn_local_lr * dE_dV[:, h].mean(dim=(0, 1))
+                        assert_finite_tensor(f"{layer_type}.pre_param_update.head_{h}.db_v", db_v)
+                        v_proj.bias.data[h*head_dim:(h+1)*head_dim] += db_v
+                    assert_finite_module_params(f"{layer_type}.post_bias_update.head_{h}", proj_layers)
     new_kv_cache = (K.detach(), V.detach()) if use_cache else None
     return x, mu, bu_err, new_kv_cache
 
