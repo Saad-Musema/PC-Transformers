@@ -7,14 +7,15 @@ Average Perplexity: 1026.9309
 Combined Loss: 4.2202
 
 Best Configuration:
-vocab_size: 1024
+vocab_size: 8192
 block_size: 208
 lr: 0.0003223786832283688
+inference_lr: 0.03223786832283688
 peak_learning_rate: 0.003223786832283688
 warmup_steps: 369
 n_embed: 160
-dropout: 0.4546369920173881
-T: 2
+dropout: 0.15
+T: 10
 update_bias: False
 num_heads: 10
 n_blocks: 3
@@ -26,3 +27,4 @@ combined_internal_weight: 0.5094684344308807
 combined_output_weight: 0.49053156556911925
 use_flash_attention: False
 alpha: 0.5
+attn_lr_multiplier: 10.0

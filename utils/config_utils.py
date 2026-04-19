@@ -12,7 +12,7 @@ def load_best_config():
         "dropout", "T", "num_heads", "n_blocks", "update_bias", "alpha",
         "lr", "inference_lr", "batch_size", "num_epochs", "internal_energy_fn_name",
         "output_energy_fn_name", "combined_internal_weight",
-        "combined_output_weight", "use_flash_attention"
+        "combined_output_weight", "use_flash_attention", "attn_lr_multiplier"
     }
 
     fallback_values = {
@@ -20,8 +20,8 @@ def load_best_config():
         "peak_learning_rate": 0.009606017304857476,
         "warmup_steps": 59,
         "n_embed": 512,
-        "dropout": 0.46876145412214615,
-        "T": 2,
+        "dropout": 0.15,
+        "T": 10,
         "num_heads": 32,
         "n_blocks": 12,
         "update_bias": False,
@@ -34,7 +34,8 @@ def load_best_config():
         "output_energy_fn_name": "pc_e",
         "combined_internal_weight": 0.8779955579743048,
         "combined_output_weight": 0.12200444202569516,
-        "use_flash_attention": False
+        "use_flash_attention": False,
+        "attn_lr_multiplier": 10.0,
     }
 
     config = {}
@@ -62,7 +63,9 @@ def load_best_config():
     else:
         print(f"[WARNING] Tuning result file not found: {file_path}")
         print(f"[INFO] Using fallback values for missing keys: {selected_keys - config.keys()}")
-        
+
+    if "inference_lr" not in config and "lr" in config:
+        config["inference_lr"] = float(config["lr"]) * 100.0
 
     # Fill in missing keys from fallback
     for key in selected_keys:
