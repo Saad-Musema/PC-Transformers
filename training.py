@@ -1,24 +1,21 @@
 import torch
 import os
-import torch.nn as nn
 import math
 import time
 import torch.nn.functional as F
 import torch.distributed as dist
+import argparse
+import json
+import logging
 from predictive_coding.config import GPTConfig
 from predictive_coding.pc_layer import PCLayer
 from model_architecture.pc_t_model import PCTransformer
 from data_preparation.dataloader import get_loaders
 from utils.config_utils import load_best_config
-from utils.pc_utils import cleanup_memory
 from utils.model_utils import set_seed
 from eval import evaluate
 from visualization import plot_metrics
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from utils.device_utils import setup_device, cleanup_memory
-import json
-import logging
+from utils.device_utils import setup_device, synchronize_model_parameters
 from data_preparation.config import vocab_size
 
 """
@@ -36,7 +33,6 @@ def train(model, dataloader, config, global_step, device, logger):
     batch_count = 0
 
     base_model = model.module if hasattr(model, 'module') else model
-    output_pc_layer = base_model.output.pc_layer
     
     for batch_idx, batch in enumerate(dataloader):
         input_ids = batch["input_ids"].to(device)
@@ -64,12 +60,18 @@ def train(model, dataloader, config, global_step, device, logger):
         for module in model.modules():
             if hasattr(module, 'local_lr'):
                 module.set_learning_rate(lr)
-                
+
         global_step += 1
         if target_ids.max() >= vocab_size:
             target_ids = torch.clamp(target_ids, max=vocab_size-1)
-            
-            
+
+        if hasattr(base_model, "set_debug_context"):
+            base_model.set_debug_context(
+                mode="train",
+                batch_idx=batch_idx,
+                global_step=global_step,
+            )
+
         logits = model(target_ids, input_ids)
         ce_loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)),
@@ -100,6 +102,8 @@ def train(model, dataloader, config, global_step, device, logger):
                 if hasattr(module, "_head_similarity_max"):
                     _ = module._head_similarity_max
 
+        synchronize_model_parameters(base_model)
+
         avg_internal_energy = sum(internal_energies) / len(internal_energies) if internal_energies else ce_loss.item()
                 
         if output_energy is not None:
@@ -117,6 +121,11 @@ def train(model, dataloader, config, global_step, device, logger):
             else:
                 print(f"  Batch {batch_idx + 1}/{len(dataloader)} | Batch Energy: {batch_energy:.4f} | Perplexity: {perplexity:.4f}")
 
+    if dist.is_initialized():
+        stats = torch.tensor([total_energy, total_ce_loss, batch_count], device=device, dtype=torch.float64)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_energy, total_ce_loss, batch_count = stats.tolist()
+
     avg_energy = total_energy / batch_count if batch_count > 0 else 0.0
     avg_ce_loss = total_ce_loss / batch_count if batch_count > 0 else 0.0
     avg_perplexity = math.exp(avg_ce_loss) if avg_ce_loss < 100 else float("inf")
@@ -125,8 +134,15 @@ def train(model, dataloader, config, global_step, device, logger):
 
 def main():
     set_seed(42)
-    local_rank, device, use_ddp = setup_device()
-    if use_ddp and not dist.is_initialized():
+    parser = argparse.ArgumentParser(description="Train the predictive coding transformer")
+    parser.add_argument('--debug-layers', action='store_true', help='Log per-layer predictive-coding stats')
+    parser.add_argument('--debug-max-batches', type=int, default=1, help='Number of batches to trace when layer debug is enabled')
+    parser.add_argument('--debug-max-steps', type=int, default=None, help='Maximum predictive-coding iterations to trace')
+    parser.add_argument('--debug-rank', type=int, default=0, help='Distributed rank that emits layer debug logs')
+    args = parser.parse_args()
+
+    local_rank, device, use_distributed = setup_device()
+    if use_distributed and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
 
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -196,14 +212,17 @@ def main():
         param_logger.info(config_json)
 
     model = PCTransformer(config).to(device)
-    if use_ddp:
-        model = DDP(model, device_ids=[local_rank], 
-                    output_device=local_rank, 
-                    find_unused_parameters=True)
+    model.configure_layer_debug(
+        enabled=args.debug_layers and rank == args.debug_rank,
+        log_fn=logger.info,
+        max_batches=args.debug_max_batches,
+        max_steps=args.debug_max_steps,
+    )
 
-        model.module.register_all_lateral_weights()
-
-    train_loader, valid_loader, _ = get_loaders(distributed=use_ddp)
+    train_loader, valid_loader, _ = get_loaders(
+        distributed=use_distributed,
+        batch_size=config.batch_size,
+    )
     
     global_step = 0
     train_energies = []
@@ -215,6 +234,8 @@ def main():
     if rank == 0:
         logger.info("========== Training started ==========") 
         logger.info(f"{sum(p.numel() for p in model.parameters())/1e6:.2f} M parameters")
+        if use_distributed:
+            logger.info("Distributed training enabled with manual parameter averaging after each batch")
 
     for epoch in range(config.num_epochs):
         if hasattr(train_loader, "sampler") and isinstance(train_loader.sampler, torch.utils.data.DistributedSampler):
@@ -239,6 +260,8 @@ def main():
         val_energies.append(val_energy)
         val_perplexities.append(val_perplexity)
 
+        model.train()
+
         if rank == 0:
             logger.info(f"Epoch {epoch + 1}/{config.num_epochs} | "
                   f"Train Energy: {train_energy:.4f} | Train Perplexity: {train_perplexity:.4f} | "
@@ -249,12 +272,7 @@ def main():
                 # Get the underlying model (handle both DDP and non-DDP cases)
                 model_to_save = model.module if hasattr(model, 'module') else model
                 checkpoint = {
-                    'epoch': epoch,
                     'model_state_dict': model_to_save.state_dict(),
-                    'train_energy': train_energy,
-                    'val_energy': val_energy,
-                    'train_perplexity': train_perplexity,
-                    'val_perplexity': val_perplexity
                 }
                 checkpoint_path = f'checkpoints/model_epoch_{epoch+1}.pt'
                 torch.save(checkpoint, checkpoint_path)
@@ -286,7 +304,7 @@ def main():
         logger.info("========== Training completed ==========")
 
     # dist.destroy_process_group()
-    if use_ddp and dist.is_initialized():
+    if use_distributed and dist.is_initialized():
         dist.destroy_process_group()
 
 
