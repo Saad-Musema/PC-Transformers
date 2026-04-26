@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 
 def initialize_logs(study_name: str):
     """Create and initialize summary and trial log files."""
@@ -13,20 +14,40 @@ def initialize_logs(study_name: str):
 
     return trials_path
 def log_trial_to_detailed_log(trials_path, trial, config, trial_time, avg_energy, write_header=False):
-    """Appends trial information in tabular format to a trials log file."""
+    """Append trial information as a readable structured block."""
     avg_perplexity = trial.user_attrs.get("perplexity", "N/A")
     combined_loss = trial.user_attrs.get("combined_loss", "N/A")
     
     with open(trials_path, "a") as f:
         if write_header:
-            f.write(f"{'Trial':<6} | {'Time(s)':<8} | {'Avg Energy':<11} | {'Perplexity':<11} | {'Combined Loss':<11} | "
-                    f"{'n_embed':<7} | {'block_size':<10} | {'heads':<5} | {'blocks':<6} | {'T':<3} | "
-                    f"{'LR':<8} | {'Inf LR':<8} | {'Warmup':<6} | {'Dropout':<7} | {'Bias':<5}\n")
-            f.write("-" * 172 + "\n")
-        
-        f.write(f"{trial.number:<6} | {trial_time:<8.1f} | {avg_energy:<11.6f} | {avg_perplexity:<11.4f} | {combined_loss:<11.6f} | "
-                f"{config.n_embed:<7} | {config.block_size:<10} | {config.num_heads:<5} | {config.n_blocks:<6} | {config.T:<3} |"
-                f"{config.peak_learning_rate:<8.2e} | {config.inference_lr:<8.2e} | {config.warmup_steps:<6} | {config.dropout:<7.3f} | {str(config.update_bias):<5}\n")
+            f.write("Each trial stores summary metrics plus full per-layer LR maps.\n")
+            f.write("-" * 120 + "\n")
+
+        trial_record = {
+            "trial": trial.number,
+            "time_s": round(trial_time, 1),
+            "avg_energy": avg_energy,
+            "perplexity": avg_perplexity,
+            "combined_loss": combined_loss,
+            "n_embed": config.n_embed,
+            "block_size": config.block_size,
+            "num_heads": config.num_heads,
+            "n_blocks": config.n_blocks,
+            "T": config.T,
+            "lr_avg": config.lr,
+            "peak_lr_avg": config.peak_learning_rate,
+            "inference_lr": config.inference_lr,
+            "warmup_steps": config.warmup_steps,
+            "dropout": config.dropout,
+            "update_bias": config.update_bias,
+            "layer_lrs": config.layer_lrs,
+            "layer_peak_lrs": config.layer_peak_lrs,
+        }
+
+        for key, value in trial_record.items():
+            serialized = json.dumps(value, sort_keys=True) if isinstance(value, dict) else value
+            f.write(f"{key}: {serialized}\n")
+        f.write("-" * 120 + "\n")
         
 def write_final_results(results_path, trial):
     config = trial.user_attrs.get("config", {})
@@ -45,7 +66,8 @@ def write_final_results(results_path, trial):
         if config:
             f.write("Best Configuration:\n")
             for key, val in config.items():
-                f.write(f"{key}: {val}\n")
+                serialized = json.dumps(val, sort_keys=True) if isinstance(val, dict) else val
+                f.write(f"{key}: {serialized}\n")
 
 def trial_batch_logger(trial_number: int, log_dir: str = "logs") -> logging.Logger:
     """

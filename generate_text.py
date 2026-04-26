@@ -115,7 +115,9 @@ def main():
         combined_internal_weight=best_config["combined_internal_weight"],
         combined_output_weight=best_config["combined_output_weight"],
         use_flash_attention=args.flash or best_config["use_flash_attention"],
-        alpha = best_config["alpha"]    
+        alpha = best_config["alpha"],
+        layer_lrs=best_config["layer_peak_lrs"],
+        layer_peak_lrs=best_config["layer_peak_lrs"],
     )
     
     model_path = "checkpoints/final_model.pt"

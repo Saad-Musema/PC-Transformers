@@ -1,7 +1,11 @@
 import logging
-from predictive_coding.config import GPTConfig
+from predictive_coding.config import GPTConfig, average_layer_learning_rate, build_pc_layer_names
 
 logger = logging.getLogger(__name__)
+
+
+def _trial_lr_name(layer_name: str) -> str:
+    return f"peak_lr__{layer_name.replace('.', '__')}"
 
 def get_dynamic_model_config(trial, vocab_size, flash=False):
     """Get model configuration with dynamic parameter combinations, including flash attention flag."""
@@ -17,9 +21,14 @@ def get_dynamic_model_config(trial, vocab_size, flash=False):
     n_blocks = trial.suggest_int('n_blocks', 1, 12)
     T = trial.suggest_int('T', 1, 14, log=True)
     dropout = trial.suggest_float("dropout", 0.0, 0.5)
-    peak_lr = trial.suggest_float('peak_lr', 1e-5, 1e-2, log=True)
-    lr = peak_lr * 0.1
-    inference_lr = lr * 100 
+    layer_peak_lrs = {
+        layer_name: trial.suggest_float(_trial_lr_name(layer_name), 1e-5, 1e-2, log=True)
+        for layer_name in build_pc_layer_names(n_blocks)
+    }
+    layer_lrs = {layer_name: peak_lr * 0.1 for layer_name, peak_lr in layer_peak_lrs.items()}
+    lr = average_layer_learning_rate(layer_lrs)
+    peak_lr = average_layer_learning_rate(layer_peak_lrs)
+    inference_lr = lr * 100
     warmup_steps = trial.suggest_int('warmup_steps', 50, 2000, log=True)
     update_bias = trial.suggest_int('update_bias_int', 0, 1) == 1
     batch_size = trial.suggest_categorical('batch_size', [4, 8, 16, 32])
@@ -35,7 +44,7 @@ def get_dynamic_model_config(trial, vocab_size, flash=False):
         warmup_steps=warmup_steps,
         n_embed=n_embed,
         dropout=dropout,
-        lr=lr, 
+        lr=lr,
         inference_lr=inference_lr,
         T=T,
         num_heads=num_heads,
@@ -48,7 +57,9 @@ def get_dynamic_model_config(trial, vocab_size, flash=False):
         combined_internal_weight = combined_internal_weight,
         combined_output_weight = combined_output_weight,
         use_flash_attention=flash,
-        alpha=alpha
+        alpha=alpha,
+        layer_lrs=layer_lrs,
+        layer_peak_lrs=layer_peak_lrs,
     )
 
 def update_global_config(config):
@@ -58,7 +69,7 @@ def update_global_config(config):
         'dropout', 'lr', 'inference_lr', 'peak_learning_rate', 'warmup_steps',
         'update_bias', 'T', 'internal_energy_fn_name', 'output_energy_fn_name',
         'batch_size', 'num_epochs', 'combined_internal_weight', 
-        'combined_output_weight', 'alpha'
+        'combined_output_weight', 'alpha', 'layer_lrs', 'layer_peak_lrs'
     ]
     
     for key in config_keys:
