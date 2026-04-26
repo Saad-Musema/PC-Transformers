@@ -35,8 +35,10 @@ class PCTransformer(nn.Module):
         self._layer_debug_max_batches = 1
         self._layer_debug_max_steps = None
         self._layer_debug_context = {}
+        self._pc_layers_by_name = {}
 
         self._assign_pc_metadata()
+        self.set_layer_learning_rates(self.config.layer_lrs)
         self.register_all_lateral_weights()
 
     def register_all_lateral_weights(self):
@@ -73,9 +75,25 @@ class PCTransformer(nn.Module):
         self.output.pc_layer.layer_type = "linear_output"
         self.output.pc_layer.debug_name = "output"
 
+        self._pc_layers_by_name = {}
         for module in self.modules():
             if isinstance(module, PCLayer):
                 module.set_debugger(self._emit_layer_debug)
+                self._pc_layers_by_name[module.debug_name] = module
+
+    def set_layer_learning_rates(self, layer_lrs: dict[str, float]) -> None:
+        """Apply per-layer local learning rates using canonical layer names."""
+        missing = []
+
+        for layer_name, module in self._pc_layers_by_name.items():
+            if layer_name not in layer_lrs:
+                missing.append(layer_name)
+                continue
+            module.set_learning_rate(layer_lrs[layer_name])
+
+        if missing:
+            missing_layers = ", ".join(sorted(missing))
+            raise KeyError(f"Missing configured learning rates for layers: {missing_layers}")
 
     def configure_layer_debug(
         self,
@@ -375,7 +393,7 @@ class PCTransformer(nn.Module):
                     kv_cache=block.attn.kv_cache if use_kv_cache else None, 
                     rope_cache=self.rope_cache,
                     output_proj=block.attn.output,
-                    attn_lr_multiplier=getattr(self.config, 'attn_lr_multiplier', 1.0),
+                    attn_lr_multiplier=1.0,
                 )
 
                 # Update cache after last iteration

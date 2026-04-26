@@ -385,9 +385,16 @@ class PCLayer(nn.Module):
     def set_learning_rate(self, lr: float):
         """Set the local learning rate for the layer."""
         self.local_lr = float(lr)
+
+        for lateral_conn in self.lateral_connections.values():
+            lateral_conn.set_learning_rate(self.local_lr)
+
     def set_inference_learning_rate(self, inference_lr: float):
         """Set the inference learning rate for the layer."""
         self.inference_lr = float(inference_lr)
+
+        for lateral_conn in self.lateral_connections.values():
+            lateral_conn.set_inference_learning_rate(self.inference_lr)
         
     def get_learning_rate(self) -> float:
         """Get the current local learning rate for the layer."""
