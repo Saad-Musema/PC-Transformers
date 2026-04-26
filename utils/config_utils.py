@@ -1,5 +1,28 @@
 import os
 import re
+import ast
+import json
+
+from predictive_coding.config import average_layer_learning_rate, resolve_layer_learning_rates
+
+
+def _parse_config_value(value: str):
+    value = value.strip()
+
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(value)
+        except (json.JSONDecodeError, ValueError, SyntaxError):
+            continue
+
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+
+    try:
+        num = float(value)
+        return int(num) if num.is_integer() else num
+    except ValueError:
+        return value.strip('"').strip("'")
 
 def load_best_config():
     """
@@ -12,7 +35,7 @@ def load_best_config():
         "dropout", "T", "num_heads", "n_blocks", "update_bias", "alpha",
         "lr", "inference_lr", "batch_size", "num_epochs", "internal_energy_fn_name",
         "output_energy_fn_name", "combined_internal_weight",
-        "combined_output_weight", "use_flash_attention", "attn_lr_multiplier"
+        "combined_output_weight", "use_flash_attention", "layer_lrs", "layer_peak_lrs"
     }
 
     fallback_values = {
@@ -35,7 +58,8 @@ def load_best_config():
         "combined_internal_weight": 0.8779955579743048,
         "combined_output_weight": 0.12200444202569516,
         "use_flash_attention": False,
-        "attn_lr_multiplier": 10.0,
+        "layer_lrs": None,
+        "layer_peak_lrs": None,
     }
 
     config = {}
@@ -50,26 +74,34 @@ def load_best_config():
             if match:
                 key, value = match.groups()
                 if key in selected_keys:
-                    try:
-                        num = float(value)
-                        config[key] = int(num) if num.is_integer() else num
-                    except ValueError:
-                        # Handle booleans
-                        if value.lower() in {"true", "false"}:
-                            config[key] = value.lower() == "true"
-                        else:
-                            # Keep as string
-                            config[key] = value.strip('"').strip("'")
+                    config[key] = _parse_config_value(value)
     else:
         print(f"[WARNING] Tuning result file not found: {file_path}")
         print(f"[INFO] Using fallback values for missing keys: {selected_keys - config.keys()}")
-
-    if "inference_lr" not in config and "lr" in config:
-        config["inference_lr"] = float(config["lr"]) * 100.0
 
     # Fill in missing keys from fallback
     for key in selected_keys:
         if key not in config:
             config[key] = fallback_values[key]
+
+    if config["inference_lr"] is None and config["lr"] is not None:
+        config["inference_lr"] = float(config["lr"]) * 100.0
+
+    layer_lrs, layer_peak_lrs = resolve_layer_learning_rates(
+        n_blocks=int(config["n_blocks"]),
+        layer_lrs=config.get("layer_lrs"),
+        layer_peak_lrs=config.get("layer_peak_lrs"),
+        lr=config.get("lr"),
+        peak_learning_rate=config.get("peak_learning_rate"),
+    )
+
+    config["layer_lrs"] = layer_lrs
+    config["layer_peak_lrs"] = layer_peak_lrs
+    config["lr"] = float(config["lr"]) if config["lr"] is not None else average_layer_learning_rate(layer_lrs)
+    config["peak_learning_rate"] = (
+        float(config["peak_learning_rate"])
+        if config["peak_learning_rate"] is not None
+        else average_layer_learning_rate(layer_peak_lrs)
+    )
 
     return config
