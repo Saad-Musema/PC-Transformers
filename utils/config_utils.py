@@ -1,5 +1,6 @@
 import os
 import re
+import ast
 
 def load_best_config():
     """
@@ -12,7 +13,8 @@ def load_best_config():
         "dropout", "T", "num_heads", "n_blocks", "alpha",
         "lr", "inference_lr", "batch_size", "num_epochs", "internal_energy_fn_name",
         "output_energy_fn_name", "combined_internal_weight",
-        "combined_output_weight", "use_flash_attention"
+        "combined_output_weight", "use_flash_attention",
+        "layer_lrs", "layer_peak_lrs"
     }
 
     fallback_values = {
@@ -33,7 +35,9 @@ def load_best_config():
         "output_energy_fn_name": "pc_e",
         "combined_internal_weight": 0.8779955579743048,
         "combined_output_weight": 0.12200444202569516,
-        "use_flash_attention": False
+        "use_flash_attention": False,
+        "layer_lrs": {},
+        "layer_peak_lrs": {},
     }
 
     config = {}
@@ -52,9 +56,13 @@ def load_best_config():
                         num = float(value)
                         config[key] = int(num) if num.is_integer() else num
                     except ValueError:
-                        # Handle booleans
                         if value.lower() in {"true", "false"}:
                             config[key] = value.lower() == "true"
+                        elif value.startswith("{") or value.startswith("["):
+                            try:
+                                config[key] = ast.literal_eval(value)
+                            except:
+                                config[key] = value.strip('"').strip("'")
                         else:
                             # Keep as string
                             config[key] = value.strip('"').strip("'")
