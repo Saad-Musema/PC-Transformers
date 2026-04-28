@@ -29,6 +29,19 @@ Usage: torchrun --nproc-per-node=<NUM_GPU> training.py
 
 """
 
+def _get_scheduled_layer_lrs(config, global_step):
+    """Return the current per-layer LR schedule value for this optimization step."""
+    warmup = config.warmup_steps and global_step < config.warmup_steps
+    progress = global_step / max(config.warmup_steps, 1) if warmup else 1.0
+    
+    scheduled = {}
+    for layer_name, base_lr in config.layer_lrs.items():
+        peak_lr = config.layer_peak_lrs.get(layer_name, base_lr)
+        current_lr = base_lr + progress * (peak_lr - base_lr) if warmup else peak_lr
+        scheduled[layer_name] = current_lr
+    
+    return scheduled
+
 def train(model, dataloader, config, global_step, device, logger):
     model.train()
     total_ce_loss = 0.0
@@ -44,23 +57,16 @@ def train(model, dataloader, config, global_step, device, logger):
 
         total_steps = len(dataloader) * config.num_epochs
         
-        if global_step < config.warmup_steps:
-            lr = config.lr + global_step / config.warmup_steps * (
-                config.peak_learning_rate - config.lr)
-        else:
-            # Cosine decay after warmup
-            decay_step = global_step - config.warmup_steps
-            decay_total = total_steps - config.warmup_steps
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
-            
-            # Minimum learning rate = 10% of peak_lr
-            min_lr = 0.1 * config.peak_learning_rate
-            lr = min_lr + (config.peak_learning_rate - min_lr) * cosine_decay
 
-        for module in model.modules():
-            if hasattr(module, 'local_lr'):
-                module.set_learning_rate(lr)
-                
+        scheduled_layer_lrs = _get_scheduled_layer_lrs(config, global_step)
+        if hasattr(base_model, "set_layer_learning_rates"):
+            base_model.set_layer_learning_rates(scheduled_layer_lrs)
+        else:
+            for module in model.modules():
+                layer_name = getattr(module, "debug_name", None)
+                if hasattr(module, "local_lr") and layer_name in scheduled_layer_lrs:
+                    module.set_learning_rate(scheduled_layer_lrs[layer_name])
+
         global_step += 1
             
         logits = model(target_ids, input_ids)
@@ -166,7 +172,9 @@ def main():
         combined_internal_weight=best_config["combined_internal_weight"],
         combined_output_weight=best_config["combined_output_weight"],
         use_flash_attention=best_config["use_flash_attention"],
-        alpha = best_config["alpha"]
+        alpha = best_config["alpha"],
+        layer_lrs=best_config["layer_lrs"],
+        layer_peak_lrs=best_config["layer_peak_lrs"],
     )
     
     # Create a separate logger for hyperparameters
