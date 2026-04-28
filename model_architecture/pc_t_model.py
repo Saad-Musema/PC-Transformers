@@ -48,6 +48,16 @@ class PCTransformer(nn.Module):
                     if module.W_latents[key] is not None:
                         module.W_latents[key] = module.W_latents[key].to(next(self.parameters()).device)
 
+    def set_layer_learning_rates(self, layer_lrs: dict):
+        """Set per-layer learning rates. layer_lrs maps canonical names to LR values."""
+        self.embedding.pc_layer.set_learning_rate(layer_lrs.get("embedding", 0))
+        for idx, block in enumerate(self.blocks):
+            block.attn.pc_qkv.set_learning_rate(layer_lrs.get(f"block_{idx}.attn.qkv", 0))
+            block.attn.pc_output.set_learning_rate(layer_lrs.get(f"block_{idx}.attn.output", 0))
+            block.mlp.pc_layer1.set_learning_rate(layer_lrs.get(f"block_{idx}.mlp.fc1", 0))
+            block.mlp.pc_layer2.set_learning_rate(layer_lrs.get(f"block_{idx}.mlp.fc2", 0))
+        self.output.pc_layer.set_learning_rate(layer_lrs.get("output", 0))
+
     def forward(self, target_ids, input_ids, use_kv_cache=False):
         """
         Forward pass of the PCTransformer model, using device-specific parallelism (CUDA streams or torch.jit.fork).
