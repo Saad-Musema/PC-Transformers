@@ -14,7 +14,7 @@ from optuna.storages import JournalStorage, JournalFileStorage
 
 from training import train
 from eval import evaluate
-from predictive_coding.config import GPTConfig
+from predictive_coding.config import GPTConfig, build_pc_layer_names, build_layer_lr_map
 from data_preparation.dataloader import get_loaders
 from model_architecture.pc_t_model import PCTransformer
 
@@ -66,7 +66,10 @@ def define_search_space(trial):
         "T": trial.suggest_int("T", min_T, min_T + 2),
         "block_size": trial.suggest_categorical("block_size", [32, 64, 128]),
         "batch_size": trial.suggest_categorical("batch_size", [8, 16]),
-        "lr": trial.suggest_float("lr", 1e-5, 6e-5, log=True),
+        "lr_embedding": trial.suggest_float("lr_embedding", 1e-5, 6e-5, log=True),
+        "lr_attention": trial.suggest_float("lr_attention", 1e-5, 6e-5, log=True),
+        "lr_mlp": trial.suggest_float("lr_mlp", 1e-5, 6e-5, log=True),
+        "lr_output": trial.suggest_float("lr_output", 1e-5, 6e-5, log=True),
         "inference_lr": trial.suggest_float("inference_lr", 0.05, 0.20, log=True),
         "dropout": trial.suggest_float("dropout", 0.0, 0.1),
     }
@@ -85,16 +88,18 @@ def define_search_space_phase2(trial, best_params):
 
     Returns:
         dict: A dictionary containing the finely tuned continuous parameters:
-            - lr (float): Weight update learning rate 
+            - lr_embedding, lr_attention, lr_mlp, lr_output (float): Per-layer learning rates
             - inference_lr (float): Latent state learning rate
             - dropout (float): Dropout probability
     """
-    lr = best_params.get("lr", 1e-3)
     inference_lr = best_params.get("inference_lr", 0.1)
     dropout = best_params.get("dropout", 0.05)
     
     return {
-        "lr": trial.suggest_float("lr", max(1e-5, lr * 0.5), min(6e-5, lr * 2.0), log=True),
+        "lr_embedding": trial.suggest_float("lr_embedding", 5e-6, 1e-4, log=True),
+        "lr_attention": trial.suggest_float("lr_attention", 5e-6, 1e-4, log=True),
+        "lr_mlp": trial.suggest_float("lr_mlp", 5e-6, 1e-4, log=True),
+        "lr_output": trial.suggest_float("lr_output", 5e-6, 1e-4, log=True),
         "inference_lr": trial.suggest_float("inference_lr", max(0.05, inference_lr * 0.7), min(0.25, inference_lr * 1.3), log=True), 
         "dropout": trial.suggest_float("dropout", max(0.0, dropout - 0.02), min(0.15, dropout + 0.02)),
     }
@@ -122,12 +127,22 @@ def create_model(params):
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    n_blocks = params["n_blocks"]
+    simple_layer_lrs = {
+        "embedding": params.get("lr_embedding", 1e-5),
+        "attention": params.get("lr_attention", 1e-5),
+        "mlp": params.get("lr_mlp", 1e-5),
+        "output": params.get("lr_output", 1e-5),
+    }
+    layer_lrs = build_layer_lr_map(n_blocks, simple_layer_lrs, 1e-5)
+    layer_peak_lrs = build_layer_lr_map(n_blocks, simple_layer_lrs, 1e-4)
+    
     config = GPTConfig(
         vocab_size=vocab_size,
         block_size= params["block_size"],
-        lr=params["lr"],
+        lr=params["lr_embedding"],
         inference_lr=params["inference_lr"],
-        peak_learning_rate=params["lr"],
+        peak_learning_rate=params["lr_embedding"],
         warmup_steps=100,
         n_embed=params["n_embed"],
         dropout=params["dropout"],
@@ -142,6 +157,8 @@ def create_model(params):
         combined_output_weight=0.3,
         use_flash_attention=False,
         alpha=0.5,
+        layer_lrs=layer_lrs,
+        layer_peak_lrs=layer_peak_lrs,
     )
 
     model = PCTransformer(config).to(device)
@@ -358,7 +375,7 @@ def run_tuning_pipeline():
         print(f"Best PPL achieved: {best_ppl:.4f}")
         
         print(f"\nParameter changes from Phase 1 -> Phase 2:")
-        for key in ['lr', 'inference_lr', 'dropout']:
+        for key in ['lr_embedding', 'lr_attention', 'lr_mlp', 'lr_output', 'inference_lr', 'dropout']:
             phase1_val = best_params.get(key)
             phase2_val = final_params.get(key)
             change_pct = ((phase2_val - phase1_val) / phase1_val * 100) if phase1_val != 0 else 0
