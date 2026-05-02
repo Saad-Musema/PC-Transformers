@@ -41,3 +41,9 @@ class GPTConfig:
     combined_output_weight: float
     use_flash_attention: bool
     alpha: float
+    pc_optimizer: str = "sgd"
+    pc_beta1: float = 0.9
+    pc_beta2: float = 0.999
+    pc_eps: float = 1e-8
+    pc_weight_decay: float = 0.0
+    pc_update_clamp: float = 0.01

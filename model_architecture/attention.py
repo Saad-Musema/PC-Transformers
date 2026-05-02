@@ -27,6 +27,12 @@ class Attention(nn.Module):
             energy_fn_name=config.internal_energy_fn_name,
             num_heads=config.num_heads,
             n_embed=config.n_embed,
+            pc_optimizer=config.pc_optimizer,
+            pc_beta1=config.pc_beta1,
+            pc_beta2=config.pc_beta2,
+            pc_eps=config.pc_eps,
+            pc_weight_decay=config.pc_weight_decay,
+            pc_update_clamp=config.pc_update_clamp,
         )
 
         self.pc_output = PCLayer(
@@ -34,6 +40,12 @@ class Attention(nn.Module):
             lr=config.lr,
             inference_lr=config.inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
+            pc_optimizer=config.pc_optimizer,
+            pc_beta1=config.pc_beta1,
+            pc_beta2=config.pc_beta2,
+            pc_eps=config.pc_eps,
+            pc_weight_decay=config.pc_weight_decay,
+            pc_update_clamp=config.pc_update_clamp,
         )
         
         # KV cache for generation: stores (K, V) tensors

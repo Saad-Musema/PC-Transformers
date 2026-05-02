@@ -9,6 +9,7 @@ from utils.pc_utils import (
     step_attn,
     finalize_step,
 )
+from utils.pc_optimizer import PCOptimizer
 from predictive_coding.lateral_connc import LateralConnections
 
 class PCLayer(nn.Module):
@@ -24,6 +25,12 @@ class PCLayer(nn.Module):
         energy_fn_name: str,
         num_heads: Optional[int] = None,
         n_embed: Optional[int] = None,
+        pc_optimizer: str = "sgd",
+        pc_beta1: float = 0.9,
+        pc_beta2: float = 0.999,
+        pc_eps: float = 1e-8,
+        pc_weight_decay: float = 0.0,
+        pc_update_clamp: float = 0.01,
     ):
         super().__init__()
         self.rope_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -34,6 +41,14 @@ class PCLayer(nn.Module):
         self.energy_fn_name = energy_fn_name 
         self.num_heads = num_heads
         self.n_embed = n_embed
+        self.pc_optimizer = PCOptimizer(
+            method=pc_optimizer,
+            beta1=pc_beta1,
+            beta2=pc_beta2,
+            eps=pc_eps,
+            weight_decay=pc_weight_decay,
+            update_clamp=pc_update_clamp,
+        )
         
         self.lateral_connections: Dict[str, LateralConnections] = {}
         
@@ -94,6 +109,7 @@ class PCLayer(nn.Module):
                 self.clamp_value,
                 self.energy_fn_name,
                 requires_update,
+                optimizer=self.pc_optimizer,
                 layer_norm=layer_norm,
             )            
             # store for later retrieval
@@ -132,6 +148,7 @@ class PCLayer(nn.Module):
                 flash=flash, 
                 kv_cache=kv_cache,  
                 use_cache=use_cache,
+                optimizer=self.pc_optimizer,
             )
             # Store cache for retrieval
             if use_cache:
@@ -153,7 +170,8 @@ class PCLayer(nn.Module):
                 self.energy_fn_name, 
                 requires_update,
                 td_err=td_err, 
-                layer_norm=layer_norm
+                layer_norm=layer_norm,
+                optimizer=self.pc_optimizer,
             )
             
         # cache and stats
