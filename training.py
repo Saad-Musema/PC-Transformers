@@ -19,6 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from utils.device_utils import setup_device, cleanup_memory
 import json
 import logging
+import argparse
 from data_preparation.config import vocab_size
 
 """
@@ -116,8 +117,40 @@ def train(model, dataloader, config, global_step, device, logger):
     return avg_energy, avg_perplexity, global_step
 
 
+def pc_optimizer_state_bytes(model):
+    base_model = model.module if hasattr(model, 'module') else model
+    total = 0
+    for module in base_model.modules():
+        optimizer = getattr(module, "pc_optimizer", None)
+        if optimizer is not None and hasattr(optimizer, "state_bytes"):
+            total += optimizer.state_bytes()
+    return total
+
+
+class LimitedLoader:
+    def __init__(self, dataloader, max_batches):
+        self.dataloader = dataloader
+        self.max_batches = max_batches
+
+    def __iter__(self):
+        for batch_idx, batch in enumerate(self.dataloader):
+            if batch_idx >= self.max_batches:
+                break
+            yield batch
+
+    def __len__(self):
+        return min(len(self.dataloader), self.max_batches)
+
+
 def main():
     set_seed(42)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pc-optimizer', choices=['sgd', 'adam_mini'], default=None)
+    parser.add_argument('--num-epochs', type=int, default=None)
+    parser.add_argument('--batch-size', type=int, default=None)
+    parser.add_argument('--max-train-batches', type=int, default=None)
+    args = parser.parse_args()
+
     local_rank, device, use_ddp = setup_device()
     if use_ddp and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
@@ -125,6 +158,12 @@ def main():
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     best_config = load_best_config()   
+    if args.pc_optimizer is not None:
+        best_config["pc_optimizer"] = args.pc_optimizer
+    if args.num_epochs is not None:
+        best_config["num_epochs"] = args.num_epochs
+    if args.batch_size is not None:
+        best_config["batch_size"] = args.batch_size
     # Configure logging
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
@@ -166,7 +205,13 @@ def main():
         combined_internal_weight=best_config["combined_internal_weight"],
         combined_output_weight=best_config["combined_output_weight"],
         use_flash_attention=best_config["use_flash_attention"],
-        alpha = best_config["alpha"]
+        alpha = best_config["alpha"],
+        pc_optimizer=best_config["pc_optimizer"],
+        pc_beta1=best_config["pc_beta1"],
+        pc_beta2=best_config["pc_beta2"],
+        pc_eps=best_config["pc_eps"],
+        pc_weight_decay=best_config["pc_weight_decay"],
+        pc_update_clamp=best_config["pc_update_clamp"],
     )
     
     # Create a separate logger for hyperparameters
@@ -216,9 +261,15 @@ def main():
             logger.info(f"Epoch {epoch + 1}/{config.num_epochs}")
 
         model.train()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        epoch_start = time.time()
+        effective_train_loader = LimitedLoader(train_loader, args.max_train_batches) if args.max_train_batches is not None else train_loader
+
         train_energy, train_perplexity, global_step = train(
-            model, train_loader, config, global_step, device, logger
+            model, effective_train_loader, config, global_step, device, logger
         )
+        epoch_time = time.time() - epoch_start
         train_energies.append(train_energy)
         train_perplexities.append(train_perplexity)
 
@@ -232,9 +283,13 @@ def main():
         val_perplexities.append(val_perplexity)
 
         if rank == 0:
+            state_bytes = pc_optimizer_state_bytes(model)
+            cuda_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
             logger.info(f"Epoch {epoch + 1}/{config.num_epochs} | "
                   f"Train Energy: {train_energy:.4f} | Train Perplexity: {train_perplexity:.4f} | "
-                  f"Val Energy: {val_energy:.4f} | Val Perplexity: {val_perplexity:.4f}")
+                  f"Val Energy: {val_energy:.4f} | Val Perplexity: {val_perplexity:.4f} | "
+                  f"Epoch Time: {epoch_time:.2f}s | Batches/s: {len(effective_train_loader) / max(epoch_time, 1e-9):.4f} | "
+                  f"PC Optimizer State: {state_bytes / (1024 ** 2):.2f} MiB | CUDA Peak: {cuda_peak / (1024 ** 2):.2f} MiB")
 
             if (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
                 os.makedirs("checkpoints", exist_ok=True)
