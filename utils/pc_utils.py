@@ -70,6 +70,7 @@ def step_embed(
     clamp_value: float,
     energy_fn_name: str,
     requires_update: bool,
+    optimizer: Optional[Any] = None,
     layer_norm: Optional[nn.Module] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -88,8 +89,11 @@ def step_embed(
         with torch.no_grad():
             flat_input_ids = input_ids.reshape(-1)
             flat_update = error.reshape(-1, error.size(-1))
-            delta = torch.clamp(local_lr * flat_update, -0.01, 0.01)
-            word_layer.weight.data.index_add_(0, flat_input_ids, delta)
+            if optimizer is not None:
+                optimizer.index_step(word_layer.weight, flat_input_ids, flat_update, local_lr)
+            else:
+                delta = torch.clamp(local_lr * flat_update, -0.01, 0.01)
+                word_layer.weight.data.index_add_(0, flat_input_ids, delta)
             
     return mu, mu_word, error
     
@@ -108,6 +112,7 @@ def step_linear(
     requires_update: bool,
     td_err: Optional[torch.Tensor],
     layer_norm: Optional[nn.Module], 
+    optimizer: Optional[Any] = None,
    ):
     """
     Predictive coding step for linear-like layers.
@@ -153,12 +158,19 @@ def step_linear(
     
     # parameter updates for the layer
     if requires_update:
-        delta_W = local_lr * torch.einsum("bsv, bsh -> vh", dE_dmu, x_input.detach())
-        delta_W = torch.clamp(delta_W, -0.01, 0.01)
-        layer.weight.data.add_(delta_W)
+        update_W = torch.einsum("bsv, bsh -> vh", dE_dmu, x_input.detach())
+        if optimizer is not None:
+            optimizer.step(layer.weight, update_W, local_lr, block="row")
+        else:
+            delta_W = torch.clamp(local_lr * update_W, -0.01, 0.01)
+            layer.weight.data.add_(delta_W)
         if layer.bias is not None:
-            delta_b = local_lr * dE_dmu.mean(dim=(0, 1))
-            layer.bias.data.add_(torch.clamp(delta_b, -0.01, 0.01))
+            update_b = dE_dmu.mean(dim=(0, 1))
+            if optimizer is not None:
+                optimizer.step(layer.bias, update_b, local_lr, block="full")
+            else:
+                delta_b = local_lr * update_b
+                layer.bias.data.add_(torch.clamp(delta_b, -0.01, 0.01))
 
     return x, mu, bu_err
 
@@ -183,6 +195,7 @@ def step_attn(
     flash: bool = False,
     kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     use_cache: bool = False,
+    optimizer: Optional[Any] = None,
     ):
     """
     Predictive coding step for attention using Sine-Cosine RoPE.
@@ -310,33 +323,53 @@ def step_attn(
 
     if requires_update:
         with torch.no_grad():
+            dW_q_full = torch.zeros_like(q_proj.weight.data)
+            dW_k_full = torch.zeros_like(k_proj.weight.data)
+            dW_v_full = torch.zeros_like(v_proj.weight.data)
+            db_q_full = torch.zeros_like(q_proj.bias.data) if q_proj.bias is not None else None
+            db_k_full = torch.zeros_like(k_proj.bias.data) if k_proj.bias is not None else None
+            db_v_full = torch.zeros_like(v_proj.bias.data) if v_proj.bias is not None else None
+
             for h in range(num_heads):
                 dW_q = torch.einsum("bte,btd->ed", x_norm, dE_dQ_raw[:, h])
                 dW_k = torch.einsum("bte,btd->ed", x_norm, dE_dK_raw[:, h])
                 dW_v = torch.einsum("bte,btd->ed", x_norm, dE_dV[:, h])
-                
-                dW_q = torch.clamp(dW_q, -0.01, 0.01)
-                dW_k = torch.clamp(dW_k, -0.01, 0.01)
-                dW_v = torch.clamp(dW_v, -0.01, 0.01)
-                
-                q_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_q
-                k_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_k
-                v_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_v
+                dW_q_full[:, h*head_dim:(h+1)*head_dim] = dW_q
+                dW_k_full[:, h*head_dim:(h+1)*head_dim] = dW_k
+                dW_v_full[:, h*head_dim:(h+1)*head_dim] = dW_v
                 
                 if q_proj.bias is not None:
                     db_q = dE_dQ_raw[:, h].mean(dim=(0, 1))
-                    db_q = torch.clamp(db_q, -0.01, 0.01)
-                    q_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_q
+                    db_q_full[h*head_dim:(h+1)*head_dim] = db_q
                 
                 if k_proj.bias is not None:
                     db_k = dE_dK_raw[:, h].mean(dim=(0, 1))
-                    db_k = torch.clamp(db_k, -0.01, 0.01)
-                    k_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_k
+                    db_k_full[h*head_dim:(h+1)*head_dim] = db_k
                 
                 if v_proj.bias is not None:
                     db_v = dE_dV[:, h].mean(dim=(0, 1))
-                    db_v = torch.clamp(db_v, -0.01, 0.01)
-                    v_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_v
+                    db_v_full[h*head_dim:(h+1)*head_dim] = db_v
+
+            if optimizer is not None:
+                optimizer.step(q_proj.weight, dW_q_full, local_lr, block="full")
+                optimizer.step(k_proj.weight, dW_k_full, local_lr, block="full")
+                optimizer.step(v_proj.weight, dW_v_full, local_lr, block="row")
+                if q_proj.bias is not None:
+                    optimizer.step(q_proj.bias, db_q_full, local_lr, block="full")
+                if k_proj.bias is not None:
+                    optimizer.step(k_proj.bias, db_k_full, local_lr, block="full")
+                if v_proj.bias is not None:
+                    optimizer.step(v_proj.bias, db_v_full, local_lr, block="full")
+            else:
+                q_proj.weight.data.add_(torch.clamp(local_lr * dW_q_full, -0.01, 0.01))
+                k_proj.weight.data.add_(torch.clamp(local_lr * dW_k_full, -0.01, 0.01))
+                v_proj.weight.data.add_(torch.clamp(local_lr * dW_v_full, -0.01, 0.01))
+                if q_proj.bias is not None:
+                    q_proj.bias.data.add_(torch.clamp(local_lr * db_q_full, -0.01, 0.01))
+                if k_proj.bias is not None:
+                    k_proj.bias.data.add_(torch.clamp(local_lr * db_k_full, -0.01, 0.01))
+                if v_proj.bias is not None:
+                    v_proj.bias.data.add_(torch.clamp(local_lr * db_v_full, -0.01, 0.01))
     new_kv_cache = (K.detach(), V.detach()) if use_cache else None
     return x, mu, bu_err, new_kv_cache
 
