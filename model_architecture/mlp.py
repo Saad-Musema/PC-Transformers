@@ -16,13 +16,13 @@ class MLP(nn.Module):
         self.pc_layer2 = PCLayer(
             T=config.T,
             lr=config.lr,
-            update_bias=config.update_bias,
+            inference_lr=config.inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
         )
 
         self.pc_layer1 = PCLayer(
             T=config.T,
             lr=config.lr,
-            update_bias=config.update_bias,
+            inference_lr=config.inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
         )

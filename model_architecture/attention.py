@@ -23,7 +23,7 @@ class Attention(nn.Module):
         self.pc_qkv = PCLayer(
             T=config.T,
             lr=config.lr,
-            update_bias = config.update_bias,
+            inference_lr=config.inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
             num_heads=config.num_heads,
             n_embed=config.n_embed,
@@ -32,7 +32,7 @@ class Attention(nn.Module):
         self.pc_output = PCLayer(
             T=config.T,
             lr=config.lr,
-            update_bias = config.update_bias,
+            inference_lr=config.inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
         )
         

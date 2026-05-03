@@ -1,3 +1,4 @@
+from logging import config
 import torch
 import torch.nn as nn
 from .embedding import Embedding_Layer
@@ -5,6 +6,8 @@ from .transformer_block import TransformerBlock
 from utils.pc_utils import ids_to_one_hot
 from .output import OutputLayer
 from utils.device_utils import create_streams_or_futures, execute_parallel, synchronize_execution
+from utils.pc_utils import precompute_freqs_cis_real
+
 
 class PCTransformer(nn.Module):
     """
@@ -17,6 +20,11 @@ class PCTransformer(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        head_dim = config.n_embed // config.num_heads
+        seq_len = config.block_size 
+
+        self.rope_cache = precompute_freqs_cis_real(head_dim, seq_len)
+
         self.config = config
         self.embedding = Embedding_Layer(config)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_blocks)])
@@ -61,13 +69,6 @@ class PCTransformer(nn.Module):
         B, S = input_ids.shape
         device = input_ids.device
         vocab_size = self.output.config.vocab_size
-        
-        # Clip input_ids and target_ids to valid range before using them
-        if input_ids.max() >= vocab_size:
-            input_ids = torch.clamp(input_ids, max=vocab_size-1)
-        
-        if target_ids.max() >= vocab_size:
-            target_ids = torch.clamp(target_ids, max=vocab_size-1)
         
         target_logits = ids_to_one_hot(target_ids, vocab_size).to(device)
         position_ids = torch.arange(S, device=input_ids.device).unsqueeze(0).expand(B, S)
@@ -267,6 +268,7 @@ class PCTransformer(nn.Module):
                     flash=getattr(self.config, 'use_flash_attention', False),
                     use_cache=use_kv_cache,  
                     kv_cache=block.attn.kv_cache if use_kv_cache else None, 
+                    rope_cache=self.rope_cache
                 )
 
                 # Update cache after last iteration

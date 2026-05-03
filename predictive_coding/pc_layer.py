@@ -20,15 +20,16 @@ class PCLayer(nn.Module):
         self,
         T: int,
         lr: float,
-        update_bias: bool,
+        inference_lr: float,
         energy_fn_name: str,
         num_heads: Optional[int] = None,
         n_embed: Optional[int] = None,
     ):
         super().__init__()
+        self.rope_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         self.T = T
         self.local_lr = lr
-        self.update_bias = update_bias
+        self.inference_lr = inference_lr
         self.clamp_value = 3.0
         self.energy_fn_name = energy_fn_name 
         self.num_heads = num_heads
@@ -45,7 +46,7 @@ class PCLayer(nn.Module):
     def register_lateral(self, layer_type: str, size: int):
         """Create and register lateral connections for layer_type."""
         if layer_type not in self.lateral_connections:
-            self.lateral_connections[layer_type] = LateralConnections(size, self.local_lr)
+            self.lateral_connections[layer_type] = LateralConnections(size, self.local_lr, self.inference_lr)
             self.add_module(f"lateral_{layer_type}", self.lateral_connections[layer_type])
 
     def _reset_step_state(self) -> None:
@@ -68,6 +69,7 @@ class PCLayer(nn.Module):
         proj_layers: Optional[dict] = None,
         input_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        rope_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
         flash: bool = False,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # ADD THIS
         use_cache: bool = False, 
@@ -76,15 +78,18 @@ class PCLayer(nn.Module):
         self._reset_step_state()
         x = self._get_cached_state(layer_type)
 
+        if rope_cache is not None:
+            self.rope_cache = rope_cache
+
+
         if layer_type == "embed":
-            mu, mu_word, mu_pos, bu_err = step_embed(
+            mu, mu_word, bu_err = step_embed(
                 t,
                 T,
                 target_activity,
                 layer,
                 layer_type,
                 input_ids,
-                position_ids,
                 self.local_lr,
                 self.clamp_value,
                 self.energy_fn_name,
@@ -92,7 +97,7 @@ class PCLayer(nn.Module):
                 layer_norm=layer_norm,
             )            
             # store for later retrieval
-            self._x_cache["embed"] = (mu_word, mu_pos)
+            self._x_cache["embed"] = (mu_word)
             self._mu_cache["embed"] = mu.detach().clone()
             if bu_err is not None:
                 self._error_cache["embed"] = bu_err.detach().clone()
@@ -102,7 +107,7 @@ class PCLayer(nn.Module):
             energy, step_errors = finalize_step(mu, target_activity, error, t, layer_type, self.energy_fn_name)
             self._energy += energy
             self._errors.extend(step_errors)
-            return mu_word, mu_pos
+            return mu_word
         
         elif layer_type == "attn":
             lateral_conn = self.lateral_connections.get(layer_type, None)
@@ -115,14 +120,15 @@ class PCLayer(nn.Module):
                 proj_layers,
                 layer_type,
                 self.local_lr,
+                self.inference_lr,
                 self.clamp_value,
                 self.energy_fn_name,
-                self.update_bias,
                 requires_update,
                 self.num_heads,
                 self.n_embed,
                 td_err=td_err, 
                 layer_norm=layer_norm,
+                rope_cache=self.rope_cache, 
                 flash=flash, 
                 kv_cache=kv_cache,  
                 use_cache=use_cache,
@@ -142,9 +148,9 @@ class PCLayer(nn.Module):
                 lateral_conn,  
                 layer_type,
                 self.local_lr, 
+                self.inference_lr,
                 self.clamp_value, 
                 self.energy_fn_name, 
-                self.update_bias, 
                 requires_update,
                 td_err=td_err, 
                 layer_norm=layer_norm
@@ -183,13 +189,6 @@ class PCLayer(nn.Module):
         """
         if layer_type == "embed":
             assert input_ids is not None and position_ids is not None, "Embedding layer requires input_ids and position_ids"
-            vocab_size = layer["word"].weight.size(0)
-            if input_ids.max() >= vocab_size:
-                input_ids = torch.clamp(input_ids, max=vocab_size-1)
-            
-            max_pos = layer["pos"].weight.size(0)
-            if position_ids.max() >= max_pos:
-                position_ids = torch.clamp(position_ids, max=max_pos-1)
             
             x_word = layer["word"].weight[input_ids] 
             x_pos = layer["pos"].weight[position_ids] 
@@ -247,7 +246,14 @@ class PCLayer(nn.Module):
     def set_learning_rate(self, lr: float):
         """Set the local learning rate for the layer."""
         self.local_lr = float(lr)
+    def set_inference_learning_rate(self, inference_lr: float):
+        """Set the inference learning rate for the layer."""
+        self.inference_lr = float(inference_lr)
         
     def get_learning_rate(self) -> float:
         """Get the current local learning rate for the layer."""
         return float(self.local_lr)
+    
+    def get_inference_learning_rate(self) -> float:
+        """Get the current inference learning rate for the layer."""
+        return float(self.inference_lr)

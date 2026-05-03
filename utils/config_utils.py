@@ -9,8 +9,8 @@ def load_best_config():
 
     selected_keys = {
         "block_size", "peak_learning_rate", "warmup_steps", "n_embed",
-        "dropout", "T", "num_heads", "n_blocks", "update_bias", "alpha",
-        "lr", "batch_size", "num_epochs", "internal_energy_fn_name",
+        "dropout", "T", "num_heads", "n_blocks", "alpha",
+        "lr", "inference_lr", "batch_size", "num_epochs", "internal_energy_fn_name",
         "output_energy_fn_name", "combined_internal_weight",
         "combined_output_weight", "use_flash_attention"
     }
@@ -24,9 +24,9 @@ def load_best_config():
         "T": 2,
         "num_heads": 32,
         "n_blocks": 12,
-        "update_bias": False,
         "alpha": 0.5,
         "lr": 0.0009606017304857476,
+        "inference_lr": 0.096,
         "batch_size": 8,
         "num_epochs": 10,
         "internal_energy_fn_name": "pc_e",
@@ -37,14 +37,14 @@ def load_best_config():
     }
 
     config = {}
-    file_path = os.path.join(os.path.dirname(__file__), "..", "tuning", "bayesian_tuning_results.txt")
+    file_path = os.path.join(os.path.dirname(__file__), "..", "tuning", "best_hyperparameters.txt")
 
     if os.path.exists(file_path):
         with open(file_path, 'r') as f:
             content = f.read()
 
         for line in content.splitlines():
-            match = re.match(r'(\w+):\s+(.*)', line)
+            match = re.match(r'(\w+)\s*[:=]\s*(.*)', line)
             if match:
                 key, value = match.groups()
                 if key in selected_keys:
