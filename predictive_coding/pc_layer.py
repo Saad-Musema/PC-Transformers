@@ -226,8 +226,8 @@ class PCLayer(nn.Module):
         return self._error_cache.get(layer_type, None)
 
     def get_energy(self) -> Optional[float]:
-        """Get the accumulated energy for the layer."""
-        return float(self._energy)
+        """Get the accumulated energy for the layer, averaged over T steps."""
+        return float(self._energy) / max(self.T, 1)
 
     def clear_energy(self):
         """Clear the stored energy and cached states for the layer."""
